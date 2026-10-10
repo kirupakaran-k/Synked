@@ -640,12 +640,9 @@ class AddDialog:
         p = filedialog.askdirectory(parent=self.win, title="Choose Folder A", mustexist=True)
         if p:
             self.a.set(os.path.normpath(p))
-            if not self.b.get() and ONEDRIVE:
-                self.b.set(os.path.join(ONEDRIVE, os.path.basename(os.path.normpath(p))))
 
     def _pick_b(self):
-        p = filedialog.askdirectory(parent=self.win, title="Choose Folder B",
-                                    initialdir=ONEDRIVE or None)
+        p = filedialog.askdirectory(parent=self.win, title="Choose Folder B", mustexist=True)
         if p:
             self.b.set(os.path.normpath(p))
 
