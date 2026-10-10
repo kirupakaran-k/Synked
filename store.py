@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -29,38 +30,71 @@ def data_dir() -> str:
 # --------------------------------------------------------------------------- config
 
 MODES = ("two-way", "mirror", "update", "collect")
-MODE_LABELS = {
+MODE_LABELS = {   # short: hovering over a type explains it in full (MODE_HELP)
     "two-way": "Two-way  (Main ⇄ folder)",
-    "mirror": "Mirror  (Main → folder, exact copy)",
-    "update": "Update  (Main → folder, add & update only)",
-    "collect": "Collect  (folder → Main, add & update only)",
+    "mirror": "Mirror  (Main → folder)",
+    "update": "Update  (Main → folder)",
+    "collect": "Collect  (folder → Main)",
 }
-# What happens to replaced/removed files in a connected folder: (keep versions?, days to keep)
-# 0 days = keep forever.
-VERSION_CHOICES = [
-    ((False, 30), "Old files → Recycle Bin"),
-    ((True, 7), "Keep old versions 7 days"),
-    ((True, 30), "Keep old versions 30 days"),
-    ((True, 90), "Keep old versions 90 days"),
-    ((True, 365), "Keep old versions 1 year"),
-    ((True, 0), "Keep old versions forever"),
-]
+MODE_HELP = {
+    "two-way": "Changes flow both ways between Main and this folder. If a file changed in "
+               "both, the newer one is kept; the older one goes to the Recycle Bin or old "
+               "versions.",
+    "mirror": "This folder becomes an exact copy of Main (master and copy). Files that aren't "
+              "in Main are removed, and changes made here are undone. Nothing here ever "
+              "reaches Main.",
+    "update": "New and changed files in Main are copied here. Nothing is ever deleted here, "
+              "even if it's removed from Main. Good for backups (incremental).",
+    "collect": "New and changed files in this folder are copied to Main. Nothing is ever "
+               "deleted from Main. Good for gathering photos or downloads into one place.",
+}
+
+# What happens to files that get removed or replaced in a connected folder.
+OLD_FILES_LABELS = {False: "Old files → Recycle Bin", True: "Keep old versions"}
+OLD_FILES_HELP = {
+    False: "Files that get removed or replaced in this folder go to the Windows Recycle Bin, "
+           "where you can restore them.",
+    True: "Files that get removed or replaced in this folder are moved into its hidden "
+          ".syncmate-versions folder, one dated folder per sync (e.g. "
+          "2026-10-10_12-38-05_001), and kept for the number of days you choose. "
+          "Slide, or type a number of days; slide all the way right to keep them forever.",
+}
+KEEP_DAYS_HELP = ("How long each dated version folder is kept before it's deleted for good. "
+                  "Slide, or type a number of days. Slide all the way right (or type "
+                  "\"forever\") to keep versions forever.")
+MAX_KEEP_DAYS = 36500
+# The slider's stops for how long kept versions stay. 0 = forever.
+KEEP_DAY_STOPS = (1, 3, 7, 14, 30, 60, 90, 180, 365, 0)
 
 
-def version_label(versions: bool, keep_days: int) -> str:
-    if not versions:
-        return VERSION_CHOICES[0][1]
-    for (v, d), label in VERSION_CHOICES:
-        if v and d == keep_days:
-            return label
-    return f"Keep old versions {keep_days} days"
+def keep_days_text(days: int) -> str:
+    if days == 0:
+        return "forever"
+    if days == 365:
+        return "1 year"
+    if days == 180:
+        return "6 months"
+    return f"{days} day{'s' if days != 1 else ''}"
 
 
-def version_choice(label: str) -> tuple:
-    for choice, text in VERSION_CHOICES:
-        if text == label:
-            return choice
-    return (False, 30)
+def parse_days(text: str):
+    """Days typed in the box: a whole number from 1 up, or 'forever' (0). None if not valid."""
+    t = text.strip().lower()
+    if t in ("forever", "always", "∞"):
+        return 0
+    m = re.fullmatch(r"(\d+)\s*(days?)?", t)
+    if not m:
+        return None
+    n = int(m.group(1))
+    return n if n <= MAX_KEEP_DAYS else None
+
+
+def nearest_stop(days: int) -> int:
+    """Index in KEEP_DAY_STOPS closest to `days` (0 = forever is its own stop)."""
+    if days <= 0:
+        return len(KEEP_DAY_STOPS) - 1
+    finite = KEEP_DAY_STOPS[:-1]
+    return min(range(len(finite)), key=lambda i: abs(finite[i] - days))
 
 
 def _new_id() -> str:

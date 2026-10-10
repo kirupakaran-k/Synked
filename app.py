@@ -19,7 +19,8 @@ from icon import COLORS, make_icon, save_ico  # noqa: E402
 from store import (CONFIG_EXT, Member, app_dir, data_dir, export_settings,  # noqa: E402
                    read_settings_file)
 from version import VERSION  # noqa: E402
-from widgets import SlideSwitch, dots, gear, plus  # noqa: E402
+from widgets import (Crossfade, FlowRow, Flyout, SlideSwitch, Tooltip, dots, gear,  # noqa: E402
+                     plus, red_x, sync_arrow)
 from cards import JobCard  # noqa: E402
 from ui_common import IS_WIN, PALETTE, elide, open_folder  # noqa: E402
 from watcher import Controller, _overlaps  # noqa: E402
@@ -128,14 +129,16 @@ class App:
 
         self.root = root = self._make_root()
         root.withdraw()
-        root.title(APP)
+        root.title(f"{APP} - {VERSION}")
         self.S = root.winfo_fpixels("1i") / 96  # display scale
         root.geometry(f"{self.px(820)}x{self.px(640)}")
-        root.minsize(self.px(560), self.px(380))
+        root.minsize(self.px(440), self.px(380))
         self._set_window_icon()
         self._heal_autostart()
 
         self.theme = self._wanted_theme()
+        self.tooltip = Tooltip(root)
+        self.fx = Crossfade(root, enabled=IS_WIN)   # smooth theme / layout changes
         sv_ttk.set_theme(self.theme)
         self._fonts()
         self._styles()
@@ -244,7 +247,9 @@ class App:
         self.ctrl.remember(theme=pref)
         t = self._wanted_theme()
         if t != self.theme:
-            self._apply_theme(t)
+            # let the switch finish sliding, then cross-fade the whole window to the new look
+            self.root.after(170, lambda: self._wanted_theme() == t and self.theme != t and
+                            self.fx.run(lambda: self._apply_theme(t), fade_ms=280))
 
     def _system_theme(self) -> str:
         try:
@@ -275,6 +280,7 @@ class App:
         pal = PALETTE[self.theme]
         s = ttk.Style()
         s.configure("Title.TLabel", font=self.f_title)
+        s.configure("Icon.TButton", padding=(6, 2, 6, 3))
         s.configure("Body.TLabel", font=self.f_body)
         s.configure("Muted.TLabel", font=self.f_small, foreground=pal["muted"])
         s.configure("Name.TLabel", font=self.f_bold)
@@ -291,15 +297,81 @@ class App:
         s.configure("Card.Error.TLabel", font=self.f_small, foreground=pal["error"])
 
     def _apply_theme(self, theme: str):
+        old_bg = PALETTE[self.theme]["bg"]
         self.theme = theme
+        self.tooltip.hide()
+        # Sun Valley's own recolouring (Tk's tk_setPalette) leaves a helper window behind
+        # if it ever fails; clear it so this theme change can run.
+        self.root.tk.eval("catch {destroy .___tk_set_palette}")
         sv_ttk.set_theme(theme)
+        self.root.update_idletasks()
         self._styles()
-        self.canvas.configure(background=self.bg)
-        self._retint()
-        self._theme_custom_widgets()
+        self._paint_theme(old_bg)
         dark_titlebar(self.root, theme == "dark")
+        # Sun Valley recolours the window from <<ThemeChanged>>, which Windows may run a
+        # little later than here; _on_theme_changed paints our colours again after it.
+        # Two more passes catch anything still in flight, whatever order Tk runs things.
+        self.root.after_idle(self._paint_theme, old_bg)
+        self.root.after(300, self._paint_theme, old_bg)
         self.card_sig = None  # force rebuild
         self.refresh()
+
+    def _on_theme_changed(self, e=None):
+        """Sun Valley's <<ThemeChanged>> handler (it runs after this one) recolours the
+        window its own way; paint our colours back on top once it is done."""
+        if e is not None and e.widget is not self.root:
+            return
+        if not self._repaint_pending:
+            self._repaint_pending = True
+            self.root.after_idle(self._repaint)
+
+    def _repaint(self):
+        self._repaint_pending = False
+        self._paint_theme()
+
+    def _paint_theme(self, old_bg=None):
+        """Apply the current theme's colours to every widget we colour ourselves.
+        (Never changes ttk styles: that would fire <<ThemeChanged>> all over again.)"""
+        self.canvas.configure(background=self.bg)
+        self.root.configure(background=self.bg)    # shows at the new edge while resizing
+        self.flyout.set_bg(self.card_bg)
+        self.head_row.set_bg(self.bg)
+        self._recolor_plain(self.root, old_bg)
+        win = self.activity_win.win if self.activity_win and self.activity_win.winfo_exists() else None
+        if win is not None:
+            self._recolor_plain(win, old_bg)
+        self._retint()
+        if win is not None:
+            self._retint(win)
+            self.activity_win.tree.tag_configure("error", foreground=PALETTE[self.theme]["error"])
+        self._theme_custom_widgets()
+
+    def _recolor_plain(self, parent, old_bg=None):
+        """Plain Tk frames/labels got their background when they were built; move them over."""
+        stale = {c.lower() for c in (old_bg, PALETTE["light"]["bg"], PALETTE["dark"]["bg"]) if c}
+        try:
+            children = parent.winfo_children()
+        except tk.TclError:
+            return
+        fg = PALETTE[self.theme]["fg"].lower()
+        bg = self.bg.lower()
+        for w in children:
+            try:
+                cls = w.winfo_class()
+                # only change what differs: every change makes Tk redraw that widget
+                if cls == "TLabel":
+                    # Tk copies the window colour into each ttk label when it is created
+                    if str(w.cget("background")).lower() != bg:
+                        w.configure(background=self.bg)
+                    if not getattr(w, "_tint_role", None) and \
+                            str(w.cget("foreground")).lower() != fg:   # plain text colour
+                        w.configure(foreground=PALETTE[self.theme]["fg"])
+                elif cls in ("Frame", "Label", "Canvas"):
+                    if str(w.cget("background")).lower() in stale - {bg}:
+                        w.configure(background=self.bg)
+            except tk.TclError:
+                pass        # one odd widget must never stop the rest from being recoloured
+            self._recolor_plain(w, old_bg)
 
     def tint(self, w, role="muted"):
         """Colour a label's text. (Sun Valley overrides style colours, so set them directly.)"""
@@ -311,29 +383,44 @@ class App:
         for w in (parent or self.root).winfo_children():
             role = getattr(w, "_tint_role", None)
             if role:
-                w.configure(foreground=PALETTE[self.theme][role])
+                try:
+                    want = PALETTE[self.theme][role]
+                    if str(w.cget("foreground")).lower() != want.lower():
+                        w.configure(foreground=want)
+                except tk.TclError:
+                    pass
             self._retint(w)
 
     # ---------------------------------------------------------------- layout
 
     def _build(self):
         root, px = self.root, self.px
-        outer = ttk.Frame(root, padding=(px(24), px(20), px(24), px(14)))
+        outer = self.outer = ttk.Frame(root, padding=(px(24), px(20), px(24), px(14)))
         outer.pack(fill="both", expand=True)
+        # while the window edge is being dragged, the contents keep their size and are
+        # laid out again once, when the mouse button is let go
+        self._frozen = None          # (width, height) the contents are held at
+        self._unfreeze_job = None
+        self._last_size = None
+        root.bind("<Configure>", self._on_window_resize, add="+")
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
-        head = ttk.Frame(outer)
+        # title on the left, buttons on the right (the buttons drop below when narrow)
+        head = self.head_row = FlowRow(outer, bg=self.bg, gap=px(12), vgap=px(10))
         head.grid(row=0, column=0, sticky="ew", pady=(0, px(14)))
-        head.columnconfigure(0, weight=1)
-        ttk.Label(head, text=APP, style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        self.summary = self.tint(ttk.Label(head, text="", style="Muted.TLabel"))
+        titles = ttk.Frame(head)
+        ttk.Label(titles, text=APP, style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        self.summary = self.tint(ttk.Label(titles, text="", style="Muted.TLabel"))
         self.summary.grid(row=1, column=0, sticky="w", pady=(px(2), 0))
-        self.add_btn = ttk.Button(head, text=" Add folder sync", style="Accent.TButton",
+        head.add(titles)
+        btns = ttk.Frame(head)
+        self.add_btn = ttk.Button(btns, text=" Add folder sync", style="Accent.TButton",
                                   compound="left", command=self.new_sync)
-        self.add_btn.grid(row=0, column=1, rowspan=2, sticky="e")
-        self.gear_btn = ttk.Button(head, style="Icon.TButton", command=self.toggle_settings)
-        self.gear_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(px(8), 0))
+        self.add_btn.pack(side="left")
+        self.gear_btn = ttk.Button(btns, style="Icon.TButton", command=self.toggle_settings)
+        self.gear_btn.pack(side="left", padx=(px(8), 0))
+        head.add(btns, stretch=True, sticky="e")
 
         # Scrollable list of pairs
         body = ttk.Frame(outer)
@@ -349,7 +436,7 @@ class App:
         self._win = self.canvas.create_window(0, 0, window=self.list, anchor="nw")
         self.list.bind("<Configure>", lambda e: self.canvas.configure(
             scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
         root.bind_all("<MouseWheel>", self._wheel)
         root.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-2, "units"))
         root.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(2, "units"))
@@ -364,8 +451,66 @@ class App:
         self._theme_custom_widgets()
         root.bind_all("<Button-1>", self._click_anywhere, add="+")
         root.bind("<Escape>", lambda e: self.hide_settings())
+        root.bind("<FocusOut>", self._app_focus_out, add="+")
+        self._repaint_pending = False
+        root.bind("<<ThemeChanged>>", self._on_theme_changed, add="+")
         self._summary_override = None
         self.drop_target(root, self.on_main_drop, self._main_hover)
+
+    def _on_canvas_resize(self, e) -> None:
+        """Keep the list as wide as the window."""
+        self.canvas.itemconfigure(self._win, width=e.width)
+
+    # ---- resizing the window: move the edge first, lay out once at the end ----------
+    SETTLE_MS = 250      # no mouse-button info (not Windows): lay out after this pause
+
+    def _mouse_down(self):
+        """Is the (primary) mouse button held down right now? None if we can't tell."""
+        if not IS_WIN:
+            return None
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            vk = 0x02 if user32.GetSystemMetrics(23) else 0x01   # swapped buttons?
+            return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+        except Exception:
+            return None
+
+    def _on_window_resize(self, e) -> None:
+        if e.widget is not self.root:
+            return
+        size = (e.width, e.height)
+        if size == self._last_size:
+            return                          # just moved, not resized
+        old, self._last_size = self._last_size, size
+        if old is None:
+            return
+        if self._frozen is None:
+            if self._mouse_down() is False:
+                return                      # maximise, snap, keyboard: lay out straight away
+            # hold the contents at their current size; Tk only paints the new edge
+            self._frozen = (self.outer.winfo_width(), self.outer.winfo_height())
+            self.outer.pack_forget()
+            self.outer.place(x=0, y=0, width=self._frozen[0], height=self._frozen[1])
+        self._schedule_unfreeze()
+
+    def _schedule_unfreeze(self) -> None:
+        if self._unfreeze_job is not None:
+            self.root.after_cancel(self._unfreeze_job)
+        down = self._mouse_down()
+        if down:                                     # still dragging: check again soon
+            self._unfreeze_job = self.root.after(40, self._schedule_unfreeze)
+        else:
+            delay = 0 if down is False else self.SETTLE_MS
+            self._unfreeze_job = self.root.after(delay, self._unfreeze)
+
+    def _unfreeze(self) -> None:
+        self._unfreeze_job = None
+        if self._frozen is None:
+            return
+        self._frozen = None
+        self.outer.place_forget()
+        self.outer.pack(fill="both", expand=True)
 
     def _main_hover(self, over: bool) -> None:
         self._summary_override = "Drop to add a folder sync" if over else None
@@ -375,7 +520,9 @@ class App:
 
     def _build_settings(self):
         px = self.px
-        p = self.settings = ttk.Frame(self.root, style="Card.TFrame", padding=(px(18), px(14)))
+        self.flyout = Flyout(self.root, self.card_bg)
+        p = self.settings = ttk.Frame(self.flyout.win, style="Card.TFrame", padding=(px(18), px(14)))
+        p.pack(fill="both", expand=True)
         p.columnconfigure(0, weight=1)
         ttk.Label(p, text="Settings", style="Card.Name.TLabel").grid(
             row=0, column=0, sticky="w", pady=(0, px(10)))
@@ -407,7 +554,7 @@ class App:
         ttk.Separator(p).grid(row=9, column=0, sticky="ew", pady=px(12))
         ttk.Button(p, text="View activity log", command=self._activity_from_settings).grid(
             row=10, column=0, sticky="ew")
-        self.tint(ttk.Label(p, text=f"{APP} {VERSION}", style="Card.Muted.TLabel")).grid(
+        self.tint(ttk.Label(p, text=f"{APP} {VERSION} - By Er.K.K.", style="Card.Muted.TLabel")).grid(
             row=11, column=0, sticky="e", pady=(px(10), 0))
 
     # ---------------------------------------------------------------- export / import
@@ -514,39 +661,80 @@ class App:
         self.hide_settings()
         self.show_activity()
 
+    def _icons(self) -> dict:
+        """This theme's icons. Made once per theme and kept: a widget still showing an
+        image that was thrown away breaks Tk's recolouring of the whole window."""
+        cache = self.__dict__.setdefault("_icon_cache", {})
+        if self.theme not in cache:
+            pal = PALETTE[self.theme]
+            line = self._line_height()
+            # the red "remove folder" button, as tall and wide as the other buttons
+            probe = ttk.Button(self.root, text="✕", width=3)
+            bw, bh = probe.winfo_reqwidth(), probe.winfo_reqheight()
+            probe.destroy()
+            cache[self.theme] = {
+                "gear": ImageTk.PhotoImage(gear(line, pal["fg"])),
+                "dots": ImageTk.PhotoImage(dots(line, pal["fg"])),
+                "plus": ImageTk.PhotoImage(plus(line, pal["on_thumb"])),
+                "remove": {k: ImageTk.PhotoImage(red_x(bw, bh, c)) for k, c in
+                           (("normal", "#C42B1C"), ("hover", "#AE2517"), ("pressed", "#962012"))},
+                # the arrow between a sync's folders, in the Add folder sync button's colours
+                "arrows": {(kind, vertical): ImageTk.PhotoImage(
+                               sync_arrow(round(bh * 1.5), bh, kind, pal["thumb"],
+                                          pal["on_thumb"], vertical))
+                           for kind in ("both", "right", "left") for vertical in (False, True)},
+            }
+        return cache[self.theme]
+
     def _theme_custom_widgets(self):
         pal = PALETTE[self.theme]
-        line = self._line_height()
-        self._gear_img = ImageTk.PhotoImage(gear(line, pal["fg"]))
-        self._dots_img = ImageTk.PhotoImage(dots(line, pal["fg"]))
+        icons = self._icons()
+        self._gear_img, self._dots_img = icons["gear"], icons["dots"]
+        self._plus_img, self._remove_imgs = icons["plus"], icons["remove"]
+        self._arrow_imgs = icons["arrows"]
+        if getattr(self, "_custom_painted", None) == self.theme:
+            return                      # already in this theme's colours: nothing to redraw
+        self._custom_painted = self.theme
+        if self.theme == "dark":
+            self.tooltip.set_colors("#2B2B2B", "#F2F2F2", "#4A4A4A")
+        else:
+            self.tooltip.set_colors("#FFFFFF", "#1C1C1C", "#C9CDD3")
         self.gear_btn.configure(image=self._gear_img)
-        ttk.Style().configure("Icon.TButton", padding=(6, 2, 6, 3))
-        self._plus_img = ImageTk.PhotoImage(plus(line, pal["on_thumb"]))
         self.add_btn.configure(image=self._plus_img)
         self.theme_switch.set_colors({"bg": self.card_bg, "track": pal["track"],
                                       "thumb": pal["thumb"], "text": pal["muted"],
                                       "text_on": pal["on_thumb"]})
 
     def toggle_settings(self):
-        if self.settings.winfo_ismapped():
+        if self.flyout.shown:
             self.hide_settings()
             return
+        self.tooltip.hide()
         b = self.gear_btn
-        y = b.winfo_rooty() - self.root.winfo_rooty() + b.winfo_height() + self.px(6)
-        self.settings.place(relx=1.0, x=-self.px(24), y=y, anchor="ne")
-        self.settings.lift()
+        self.flyout.show(lambda: (b.winfo_rootx() + b.winfo_width(),
+                                  b.winfo_rooty() + b.winfo_height() + self.px(6)))
 
-    def hide_settings(self):
-        self.settings.place_forget()
+    def hide_settings(self, animate: bool = True):
+        self.flyout.hide(animate=animate)
 
     def _click_anywhere(self, e):
         """Close the settings panel when clicking somewhere else in the window."""
-        if not self.settings.winfo_ismapped():
+        if not self.flyout.shown:
             return
         w = str(e.widget)
-        if w.startswith(str(self.settings)) or w == str(self.gear_btn):
+        if w.startswith(str(self.flyout.win)) or w == str(self.gear_btn):
             return
         self.hide_settings()
+
+    def _app_focus_out(self, e=None):
+        """Close the settings panel when another app is brought to the front."""
+        def check():
+            try:
+                if str(self.root.tk.call("focus")) in ("", "none"):
+                    self.hide_settings()
+            except tk.TclError:
+                pass
+        self.root.after(60, check)
 
     def _on_yscroll(self, lo, hi):
         self.scroll.set(lo, hi)
@@ -621,6 +809,10 @@ class App:
 
     def set_expanded(self, key) -> None:
         """Expand one card in place (only one at a time); None collapses all."""
+        if self.expanded != key:
+            self.fx.run(lambda: self._set_expanded(key), fade_ms=170)
+
+    def _set_expanded(self, key) -> None:
         if self.expanded == key:
             return
         if self.expanded == "new" and key != "new":
@@ -637,7 +829,10 @@ class App:
 
     def new_sync(self, prefill=()) -> None:
         """Show the blank 'New folder sync' card at the top of the list."""
-        self.hide_settings()
+        self.hide_settings(animate=False)
+        self.fx.run(lambda: self._new_sync(prefill), fade_ms=170)
+
+    def _new_sync(self, prefill=()) -> None:
         if not self._draft:
             self._draft = True
             self.set_expanded(None)
@@ -652,6 +847,9 @@ class App:
         card.main_box.focus_set()
 
     def close_draft(self) -> None:
+        self.fx.run(self._close_draft, fade_ms=170)
+
+    def _close_draft(self) -> None:
         self._draft = False
         if self.expanded == "new":
             self.expanded = None
@@ -727,7 +925,8 @@ class App:
             }[overall]
         if getattr(self, "_summary_override", None):
             text = self._summary_override
-        self.summary.configure(text=text)
+        if str(self.summary.cget("text")) != text:
+            self.summary.configure(text=text)
         if self.tray is not None:
             state = self.ctrl.overall() if pairs else "synced"
             if state != getattr(self, "_tray_state", None):
@@ -832,7 +1031,7 @@ class App:
             self._last_theme_check = now
             t = self._wanted_theme()
             if t != self.theme:
-                self._apply_theme(t)
+                self.fx.run(lambda: self._apply_theme(t), fade_ms=280)
         self.refresh()
         if self.activity_win and self.activity_win.winfo_exists():
             self.activity_win.refresh()

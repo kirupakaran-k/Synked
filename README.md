@@ -10,7 +10,7 @@ moving it.
    (or from python.org; tick **Add python.exe to PATH**).
 2. Double-click **`build.bat`** in the version's folder. A couple of minutes later the app is
    ready in a folder named after its version, **outside** the version folders, e.g.
-   `D:\syncmate\build 2.3\SyncMate.exe` (with its icon and build log).
+   `D:\syncmate\build 2.4\SyncMate.exe` (with its icon and build log).
 
    The build tools (Python libraries, about 50 MB) are kept in
    `%LOCALAPPDATA%\SyncMate\build-env`, not in your SyncMate folder, and are reused by every
@@ -23,7 +23,7 @@ moving it.
    wrong, the window stays open so you can read why. If *Start with Windows* is on, it
    follows to the newest build the next time that build runs.
 
-3. Run `build 2.3\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+3. Run `build 2.4\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
    **connected folders**, and click **Start syncing**. You can also **drag folders from
    File Explorer** onto the boxes or onto the window (several at once: the first becomes
    Main, the rest connected folders).
@@ -34,6 +34,7 @@ moving it.
    connected folders and **Apply**; Pause / Resume, Sync now, see its **recent activity**,
    or Remove it.
 
+   The window rearranges itself when you make it narrow (rows wrap and stack).
    The **⚙ settings** button (top right) has Start with Windows, the Theme slider
    (Auto / Light / Dark), **Export / Import** of your folder sync configurations, and the full
    activity log.
@@ -42,6 +43,9 @@ You can also run it without building: `py app.py`
 (after `py -m pip install -r requirements.txt`).
 
 ## Sync types (chosen per connected folder)
+
+Hover over a sync type or an old-files choice in SyncMate (also inside the open dropdown
+list) to see what it does.
 
 Every connected folder syncs with the job's **Main folder**. Changes pass through Main, so
 an edit in one connected folder reaches Main and from there the other folders.
@@ -55,8 +59,9 @@ an edit in one connected folder reaches Main and from there the other folders.
 
 **Old files** (also per connected folder):
 - **Recycle Bin**: files that are removed, or a copy's own edits that get overwritten, go to the Recycle Bin.
-- **Keep old versions** for **7 days, 30 days, 90 days, 1 year or forever**: every replaced or
-  removed file is moved into that folder's hidden `.syncmate-versions` folder instead. Each
+- **Keep old versions**, for as long as you choose: drag the slider (1 day up to 1 year, or all
+  the way right for forever) or type any number of days in the box next to it: every replaced or removed file is moved into the hidden `.syncmate-versions`
+  folder at the top of that synced folder instead (deleting a subfolder never touches it). Each
   sync gets its own folder there, named by date, time and a number, with the old files
   inside in their usual subfolders:
 
