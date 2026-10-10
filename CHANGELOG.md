@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 1.3 - Drag and drop folders
+
+Drag folders from File Explorer onto the folder boxes or onto the window.
+
 ## 1.2 - Thinner plus, icon cache refresh
 
 Slimmer + sign; build.bat refreshes Windows' icon cache after building.

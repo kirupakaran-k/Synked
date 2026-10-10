@@ -4,3 +4,4 @@ Pillow>=10.0
 Send2Trash>=1.8.2
 sv-ttk>=2.6
 darkdetect>=0.8
+tkinterdnd2>=0.4

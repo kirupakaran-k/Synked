@@ -59,6 +59,7 @@ python icon.py >nul || goto :fail
 echo [6/6] Building SyncMate.exe (takes a minute)...
 pyinstaller --noconfirm --clean --onefile --windowed --name SyncMate --icon syncmate.ico ^
   --collect-data sv_ttk ^
+  --collect-all tkinterdnd2 ^
   --hidden-import pystray._win32 ^
   --collect-submodules send2trash ^
   --collect-submodules darkdetect ^

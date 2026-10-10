@@ -21,6 +21,11 @@ from store import data_dir  # noqa: E402
 from widgets import SlideSwitch, gear, plus  # noqa: E402
 from watcher import Controller  # noqa: E402
 
+try:  # drag-and-drop of folders from File Explorer (optional; app works without it)
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except Exception:  # pragma: no cover
+    TkinterDnD = None
+
 try:
     import darkdetect
 except Exception:  # pragma: no cover
@@ -28,7 +33,7 @@ except Exception:  # pragma: no cover
 
 IS_WIN = os.name == "nt"
 APP = "SyncMate"
-VERSION = "1.2"  # shown in Settings, so you can tell which build is running
+VERSION = "1.3"  # shown in Settings, so you can tell which build is running
 SHOW_FLAG = os.path.join(data_dir(), "show.flag")   # "please show your window"
 QUIT_FLAG = os.path.join(data_dir(), "quit.flag")   # "please quit" (used by build.bat)
 ONEDRIVE = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or ""
@@ -174,7 +179,7 @@ class App:
         self.activity_win = None
         self.tray = None
 
-        self.root = root = tk.Tk()
+        self.root = root = self._make_root()
         root.withdraw()
         root.title(APP)
         self.S = root.winfo_fpixels("1i") / 96  # display scale
@@ -196,6 +201,69 @@ class App:
         root.after(200, self._poll)
 
     # ---------------------------------------------------------------- look & feel
+
+    @staticmethod
+    def _make_root() -> tk.Tk:
+        if TkinterDnD is not None:
+            try:
+                return TkinterDnD.Tk()
+            except Exception:
+                pass
+        return tk.Tk()
+
+    @property
+    def can_drop(self) -> bool:
+        return hasattr(self.root, "drop_target_register")
+
+    def drop_target(self, widget, on_paths, on_hover=None) -> None:
+        """Let folders be dragged from File Explorer onto `widget`.
+        on_paths(list_of_paths) runs on drop; on_hover(True/False) while dragging over."""
+        if not self.can_drop:
+            return
+        def enter(e):
+            if on_hover:
+                on_hover(True)
+            return e.action
+        def leave(e):
+            if on_hover:
+                on_hover(False)
+            return e.action
+        def drop(e):
+            if on_hover:
+                on_hover(False)
+            on_paths([os.path.normpath(p) for p in self.root.tk.splitlist(e.data)])
+            return e.action
+        try:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind("<<DropEnter>>", enter)
+            widget.dnd_bind("<<DropPosition>>", lambda e: e.action)
+            widget.dnd_bind("<<DropLeave>>", leave)
+            widget.dnd_bind("<<Drop>>", drop)
+        except Exception:
+            pass
+
+    def on_main_drop(self, paths) -> None:
+        """Folders dropped on the main window: open (or fill) the Add folder pair dialog."""
+        folders = [p for p in paths if os.path.isdir(p)]
+        if not folders:
+            self._flash_summary("Drop folders, not files, to add a pair.")
+            return
+        dlg = getattr(self, "add_win", None)
+        if dlg and dlg.win.winfo_exists():
+            dlg.fill(folders)
+            dlg.win.lift()
+        else:
+            self.add_win = AddDialog(self, prefill=folders)
+
+    def _flash_summary(self, text: str, ms: int = 2500) -> None:
+        self._summary_override = text
+        self.refresh()
+
+        def clear():
+            if self._summary_override == text:
+                self._summary_override = None
+                self.refresh()
+        self.root.after(ms, clear)
 
     def _set_window_icon(self):
         """Title bar / taskbar icon. On Windows use a real multi-size .ico (crisp at 16 px);
@@ -343,6 +411,12 @@ class App:
         self._theme_custom_widgets()
         root.bind_all("<Button-1>", self._click_anywhere, add="+")
         root.bind("<Escape>", lambda e: self.hide_settings())
+        self._summary_override = None
+        self.drop_target(root, self.on_main_drop, self._main_hover)
+
+    def _main_hover(self, over: bool) -> None:
+        self._summary_override = "Drop to add a folder pair" if over else None
+        self.refresh()
 
     # ---------------------------------------------------------------- settings panel
 
@@ -468,6 +542,8 @@ class App:
                 "paused": "All syncing is paused",
                 "error": "Something needs your attention",
             }[overall]
+        if getattr(self, "_summary_override", None):
+            text = self._summary_override
         self.summary.configure(text=text)
         if self.tray is not None:
             state = self.ctrl.overall() if pairs else "synced"
@@ -531,7 +607,8 @@ class App:
         ttk.Label(box, image=self._big_icon).pack(pady=(0, px(14)))
         ttk.Label(box, text="Keep any two folders in sync", style="Name.TLabel").pack()
         self.tint(ttk.Label(box, text="Pick a folder on your PC and one in OneDrive (or anywhere).\n"
-                                      "Changes flow both ways, automatically.",
+                                      "Changes flow both ways, automatically.\n\n"
+                                      "Tip: you can drag folders onto this window.",
                             style="Muted.TLabel", justify="center")).pack(pady=(px(4), px(16)))
         ttk.Button(box, text="Add your first pair", style="Accent.TButton",
                    command=self.add_dialog).pack()
@@ -581,7 +658,11 @@ class App:
     # ---------------------------------------------------------------- dialogs
 
     def add_dialog(self):
-        AddDialog(self)
+        dlg = getattr(self, "add_win", None)
+        if dlg and dlg.win.winfo_exists():
+            dlg.win.lift()
+            return
+        self.add_win = AddDialog(self)
 
     def show_activity(self):
         if self.activity_win and self.activity_win.winfo_exists():
@@ -691,7 +772,7 @@ class App:
 
 
 class AddDialog:
-    def __init__(self, app: App):
+    def __init__(self, app: App, prefill=None):
         self.app = app
         px = app.px
         self.win = win = tk.Toplevel(app.root)
@@ -707,14 +788,18 @@ class AddDialog:
             row=0, column=0, columnspan=2, sticky="w", pady=(0, px(14)))
         self.a = tk.StringVar()
         self.b = tk.StringVar()
-        self._field(f, 1, "Folder A", self.a, "This folder…", self._pick_a)
+        self.a_box = self._field(f, 1, "Folder A", self.a, "This folder…", self._pick_a)
         self.b_box = self._field(f, 3, "Folder B", self.b, "…stays identical to this one",
                                  self._pick_b, combo=True)
         self.a.trace_add("write", lambda *_: self._suggest())
+        for box, which in ((self.a_box, "a"), (self.b_box, "b")):
+            app.drop_target(box, lambda paths, w=which: self.on_drop(w, paths),
+                            lambda over, b=box: b.state(["focus"] if over else ["!focus"]))
 
         app.tint(ttk.Label(f, style="Muted.TLabel", wraplength=px(440), justify="left", text=(
             "Tip: pick a folder inside OneDrive as Folder B to back Folder A up to the cloud. "
-            "A folder that doesn't exist yet will be created.\n\n"
+            "A folder that doesn't exist yet will be created. You can also drag folders "
+            "from File Explorer onto the boxes.\n\n"
             "If both already contain files, they're merged. Where the same file differs, the "
             "newer one is kept and the older one goes to the Recycle Bin."))).grid(
             row=5, column=0, columnspan=2, sticky="w", pady=(px(14), 0))
@@ -738,6 +823,29 @@ class AddDialog:
         win.deiconify()
         dark_titlebar(win, app.theme == "dark")
         win.grab_set()
+        if prefill:
+            self.fill(prefill)
+
+    def fill(self, folders) -> None:
+        """Put dropped folders into the empty boxes (A first)."""
+        for p in folders:
+            if not self.a.get().strip():
+                self.a.set(p)
+            elif not self.b.get().strip():
+                self.b.set(p)
+
+    def on_drop(self, which: str, paths) -> None:
+        """Folders dropped on box `which` ("a" or "b"). Two folders fill both boxes."""
+        folders = [p for p in paths if os.path.isdir(p)]
+        if not folders:
+            self.err.configure(text="That's a file. Drop a folder instead.")
+            return
+        self.err.configure(text="")
+        if len(folders) >= 2:
+            self.a.set(folders[0])
+            self.b.set(folders[1])
+        else:
+            (self.a if which == "a" else self.b).set(folders[0])
 
     def _field(self, f, row, label, var, hint, pick, combo=False):
         px = self.app.px

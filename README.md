@@ -16,6 +16,8 @@ moving it.
    one, starts it again if it was running, and closes its own window when done.
    If something goes wrong, the window stays open so you can read why.
 3. Run `SyncMate.exe`, click **Add folder pair**, pick the two folders, and you're done.
+   You can also **drag folders from File Explorer**: onto the Folder A / Folder B boxes,
+   or straight onto the SyncMate window (drop two at once to fill both boxes).
    Turn on **Start with Windows** so it runs in the background from then on.
    The **⚙ settings** button (top right) has Start with Windows and the Theme slider:
    Auto (follows Windows), Light or Dark.
