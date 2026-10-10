@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 2.3 - kiru exports, dated version folders
+
+Exports are saved as .kiru files; the settings section is called 'Folder sync configurations' with plain Export / Import buttons. Kept old versions are organised in one folder per sync moment (e.g. 2026-10-10_12-38-05_001\Reports\budget.xlsx) and kept for 7 days, 30 days, 90 days, 1 year or forever, chosen per connected folder; the .syncmate-versions folder is now hidden on Windows.
+
 ## 2.2 - Export and import, cleaner builds
 
 Settings has Export… / Import… for your folder syncs (replace or add; overlapping syncs skipped; missing folders wait until they appear). The 'settings folder' option from 2.1 is replaced by this. build.bat now puts the app in 'build <version>' outside the version folders (e.g. D:\syncmate\build 2.2), keeps its tools in %LOCALAPPDATA%\SyncMate\build-env and leaves no .venv or __pycache__ behind.

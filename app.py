@@ -16,7 +16,7 @@ import sv_ttk  # noqa: E402
 from PIL import ImageTk  # noqa: E402
 
 from icon import COLORS, make_icon, save_ico  # noqa: E402
-from store import (Member, app_dir, data_dir, export_settings,  # noqa: E402
+from store import (CONFIG_EXT, Member, app_dir, data_dir, export_settings,  # noqa: E402
                    read_settings_file)
 from version import VERSION  # noqa: E402
 from widgets import SlideSwitch, dots, gear, plus  # noqa: E402
@@ -396,16 +396,12 @@ class App:
         self.theme_switch.grid(row=4, column=0, sticky="w")
 
         ttk.Separator(p).grid(row=5, column=0, sticky="ew", pady=px(12))
-        self.tint(ttk.Label(p, text="Your folder syncs", style="Card.Body.TLabel"), "fg").grid(
-            row=6, column=0, sticky="w")
-        self.tint(ttk.Label(p, text="Save them to a file, or load them from one\n"
-                                    "(e.g. to set up another PC).",
-                            style="Card.Muted.TLabel", justify="left")).grid(
-            row=7, column=0, sticky="w", pady=(px(2), px(8)))
+        self.tint(ttk.Label(p, text="Folder sync configurations", style="Card.Body.TLabel"),
+                  "fg").grid(row=6, column=0, sticky="w", pady=(0, px(8)))
         xb = tk.Frame(p, background=self.card_bg)
         xb.grid(row=8, column=0, sticky="w")
-        ttk.Button(xb, text="Export…", command=self.export_syncs).pack(side="left")
-        ttk.Button(xb, text="Import…", command=self.import_syncs).pack(
+        ttk.Button(xb, text="Export", command=self.export_syncs).pack(side="left")
+        ttk.Button(xb, text="Import", command=self.import_syncs).pack(
             side="left", padx=(px(8), 0))
 
         ttk.Separator(p).grid(row=9, column=0, sticky="ew", pady=px(12))
@@ -424,9 +420,10 @@ class App:
             return False
         if path is None:
             path = filedialog.asksaveasfilename(
-                parent=self.root, title="Export folder syncs", defaultextension=".json",
-                initialfile=f"SyncMate folder syncs {time.strftime('%Y-%m-%d')}.json",
-                filetypes=[("SyncMate settings", "*.json"), ("All files", "*.*")])
+                parent=self.root, title="Export folder sync configurations",
+                defaultextension=CONFIG_EXT,
+                initialfile=f"SyncMate folder syncs {time.strftime('%Y-%m-%d')}{CONFIG_EXT}",
+                filetypes=[("SyncMate configuration", f"*{CONFIG_EXT}"), ("All files", "*.*")])
             if not path:
                 return False
         try:
@@ -443,8 +440,9 @@ class App:
         """Load folder syncs from an exported file. Returns how many were added."""
         if path is None:
             path = filedialog.askopenfilename(
-                parent=self.root, title="Import folder syncs",
-                filetypes=[("SyncMate settings", "*.json"), ("All files", "*.*")])
+                parent=self.root, title="Import folder sync configurations",
+                filetypes=[("SyncMate configuration", f"*{CONFIG_EXT}"),
+                           ("Older exports", "*.json"), ("All files", "*.*")])
             if not path:
                 return 0
         try:
@@ -491,7 +489,8 @@ class App:
                     notify=False)
                 self.set_theme_pref(cfg.theme)
         for j in added:
-            job = self.ctrl.add_job(j.main, [Member(m.path, m.mode, m.versions) for m in j.members])
+            job = self.ctrl.add_job(j.main, [Member(m.path, m.mode, m.versions, keep_days=m.keep_days)
+                                             for m in j.members])
             if j.paused:
                 self.ctrl.set_paused(job.id, True)
         self.ctrl._log("", "info", f"Imported {len(added)} folder sync"

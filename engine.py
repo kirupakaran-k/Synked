@@ -13,8 +13,10 @@ That is the "two-way" type. Each connected folder can instead use:
     update   Main -> folder: new and changed files are copied; nothing is ever deleted
     collect  folder -> Main: the same, in the other direction
 
-Replaced or deleted files go to the Recycle Bin, or, if the folder keeps versions,
-into a hidden ".syncmate-versions" folder (the last 10 versions of each file).
+Replaced or deleted files go to the Recycle Bin, or, if the folder keeps versions, into
+its hidden ".syncmate-versions" folder: one folder per sync moment, named like
+"2026-10-10_12-38-05_001", holding the old files in their usual subfolders. Moments older
+than the folder's chosen number of days are removed.
 
 Every delete goes to the Recycle Bin, and every copy is written to a temporary
 file first and then swapped in, so a crash never leaves a half-written file.
@@ -45,7 +47,7 @@ _IGNORED = [p.lower() for p in IGNORED]
 TEMP_PREFIX = ".syncmate-"
 FALLBACK_BIN = ".syncmate-recycle"
 VERSIONS_DIR = ".syncmate-versions"
-KEEP_VERSIONS = 10
+MOMENT_FORMAT = "%Y-%m-%d_%H-%M-%S"   # + "_001": one folder per sync moment
 MTIME_TOLERANCE_NS = 2_000_000_000  # FAT/exFAT drives store times in 2-second steps
 EMPTY_GUARD_MIN = 20  # a side that suddenly lost >= this many items makes us stop and ask
 
@@ -230,6 +232,7 @@ class Engine:
                     raise LooksEmpty(i, roots[i])
 
         res = Result()
+        self._moments = {}   # one versions folder per side for this whole sync run
         keys = sorted(set(scans[0]) | set(scans[1]) | set(base))
         # What looks changed (for the progress bar); the real decision is made per item.
         todo = {k for k in keys if self._looks_changed(k, scans, base)}
@@ -456,10 +459,19 @@ class Engine:
         """Move an item out of the way: into old versions or the Recycle Bin."""
         root = (pair.left, pair.right)[side]
         if getattr(pair, "versions", False):
-            keep_version(root, rel)
+            keep_version(root, rel, self._moment(root))
             return "old versions"
         self.trash(os.path.join(root, rel), root)
         return "the Recycle Bin"
+
+    def _moment(self, root: str) -> str:
+        """The versions folder for this sync run in `root` (created when first needed)."""
+        moments = getattr(self, "_moments", None)
+        if moments is None:
+            moments = self._moments = {}
+        if root not in moments:
+            moments[root] = new_moment(root)
+        return moments[root]
 
     def _log(self, pair, level, msg) -> None:
         self.log(getattr(pair, "job", "") or pair.id, level, msg)
@@ -494,7 +506,7 @@ class Engine:
             was = getattr(self, "_was", (None, None))
             keep = None
             if d is not None and getattr(pair, "versions", False):
-                keep = lambda: keep_version(roots[dst], rel)   # noqa: E731
+                keep = lambda: keep_version(roots[dst], rel, self._moment(roots[dst]))  # noqa: E731
             elif (d is not None and was[dst] != d
                   and getattr(pair, "mode", "two-way") != "two-way"):
                 # The copy here was edited since the last sync: don't just overwrite it.
@@ -529,39 +541,85 @@ class Engine:
                            shallow=False)
 
 
-def keep_version(root: str, rel: str) -> str:
-    """Move `rel` into <root>/.syncmate-versions/, stamped with the time, keeping the
-    newest KEEP_VERSIONS versions of each file. Returns where it went."""
-    parent, name = os.path.split(rel)
-    stem, ext = os.path.splitext(name)
-    if os.path.isdir(os.path.join(root, rel)):
-        stem, ext = name, ""
-    vdir = os.path.join(root, VERSIONS_DIR, parent)
-    os.makedirs(vdir, exist_ok=True)
-    stamp = time.strftime("%Y-%m-%d %H%M%S")
-    prefix, suffix = f"{stem} [", f"]{ext}"
-    # several versions in the same second get a counter: always one past the highest,
-    # so a newer version can never take the name (and place) of a pruned older one
-    same = [f[len(prefix) + len(stamp):len(f) - len(suffix)].strip()
-            for f in os.listdir(vdir) if f.startswith(prefix + stamp) and f.endswith(suffix)]
-    n = max([int(x) for x in same if x.isdigit()] + [1 if "" in same else 0]) + 1
-    dest = os.path.join(vdir, f"{stem} [{stamp}{'' if n == 1 else f' {n}'}]{ext}")
-    os.replace(os.path.join(root, rel), dest)
-    # prune: keep only the newest versions of this item
+def versions_root(root: str) -> str:
+    """<root>/.syncmate-versions, created and (on Windows) marked hidden."""
+    vroot = os.path.join(root, VERSIONS_DIR)
+    if not os.path.isdir(vroot):
+        os.makedirs(vroot, exist_ok=True)
+        if os.name == "nt":
+            try:
+                import ctypes
+                k32 = ctypes.windll.kernel32
+                attrs = k32.GetFileAttributesW(vroot)
+                if attrs != -1:
+                    k32.SetFileAttributesW(vroot, attrs | 0x2)   # FILE_ATTRIBUTE_HIDDEN
+            except Exception:
+                pass
+    return vroot
 
-    def order(f):  # "2026-10-10 123805" or "2026-10-10 123805 2" -> sortable
-        parts = f[len(prefix):len(f) - len(suffix)].split(" ")
-        return (parts[0], parts[1] if len(parts) > 1 else "",
-                int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1)
-    olds = sorted((f for f in os.listdir(vdir) if f.startswith(prefix) and f.endswith(suffix)
-                   and len(f[len(prefix):len(f) - len(suffix)].split(" ")) in (2, 3)), key=order)
-    for f in olds[:-KEEP_VERSIONS]:
-        p = os.path.join(vdir, f)
+
+def new_moment(root: str, when: float | None = None) -> str:
+    """Create the folder for one sync moment, e.g. "2026-10-10_12-38-05_001"; the number
+    counts up if several moments start in the same second. Returns its name."""
+    vroot = versions_root(root)
+    stamp = time.strftime(MOMENT_FORMAT, time.localtime(when))
+    n = 1
+    while True:
+        name = f"{stamp}_{n:03d}"
         try:
-            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
-        except OSError:
-            pass
+            os.mkdir(os.path.join(vroot, name))
+            return name
+        except FileExistsError:
+            n += 1
+
+
+def keep_version(root: str, rel: str, moment: str) -> str:
+    """Move `rel` (a file or a whole folder) into the moment's folder, keeping its usual
+    subfolders, e.g. .syncmate-versions/2026-10-10_12-38-05_001/Reports/budget.xlsx.
+    Returns where it went."""
+    dest = os.path.join(root, VERSIONS_DIR, moment, rel)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    if os.path.lexists(dest):   # the same item twice in one moment: keep both
+        stem, ext = os.path.splitext(dest)
+        n = 2
+        while os.path.lexists(f"{stem} ({n}){ext}"):
+            n += 1
+        dest = f"{stem} ({n}){ext}"
+    os.replace(os.path.join(root, rel), dest)
     return dest
+
+
+def moment_time(name: str) -> float | None:
+    """When a moment folder was made, from its name (None if it isn't one of ours)."""
+    try:
+        stamp, num = name.rsplit("_", 1)
+        if not num.isdigit():
+            return None
+        return time.mktime(time.strptime(stamp, MOMENT_FORMAT))
+    except ValueError:
+        return None
+
+
+def prune_versions(root: str, keep_days: int, now: float | None = None) -> int:
+    """Remove moment folders older than `keep_days` (0 = keep forever). Returns how many."""
+    if keep_days <= 0:
+        return 0
+    vroot = os.path.join(root, VERSIONS_DIR)
+    try:
+        names = os.listdir(vroot)
+    except OSError:
+        return 0
+    cutoff = (now if now is not None else time.time()) - keep_days * 86400
+    removed = 0
+    for name in names:
+        t = moment_time(name)
+        if t is not None and t < cutoff:
+            try:
+                shutil.rmtree(os.path.join(vroot, name))
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def _actual_rel(root: str, rel: str) -> str | None:

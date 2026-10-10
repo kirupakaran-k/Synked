@@ -456,33 +456,76 @@ def test_collect_is_update_in_reverse(env):
 def test_versions_are_kept_instead_of_recycled(env):
     import engine
     p = link(env, "two-way", versions=True)
-    write(f"{env.L}/report.docx", "v1", mtime=1_000_000)
+    write(f"{env.L}/Reports/report.docx", "v1", mtime=1_000_000)
     env.eng.reconcile(p)
-    write(f"{env.L}/report.docx", "v2", mtime=1_000_100)
+    write(f"{env.L}/Reports/report.docx", "v2", mtime=1_000_100)
     env.eng.reconcile(p)
-    vdir = os.path.join(env.R, engine.VERSIONS_DIR)
-    vs = os.listdir(vdir)
-    assert len(vs) == 1 and vs[0].startswith("report [") and vs[0].endswith("].docx")
-    assert read(os.path.join(vdir, vs[0])) == "v1"              # the old content is kept
-    os.remove(f"{env.L}/report.docx")
+    vroot = os.path.join(env.R, engine.VERSIONS_DIR)
+    moments = sorted(os.listdir(vroot))
+    assert len(moments) == 1 and engine.moment_time(moments[0]) is not None
+    assert moments[0].endswith("_001")                          # date_time_number
+    kept = os.path.join(vroot, moments[0], "Reports", "report.docx")
+    assert read(kept) == "v1"                                   # old copy, usual subfolder
+    os.remove(f"{env.L}/Reports/report.docx")
     env.eng.reconcile(p)
-    assert not os.path.exists(f"{env.R}/report.docx")
-    assert sorted(read(os.path.join(vdir, f)) for f in os.listdir(vdir)) == ["v1", "v2"]
+    assert not os.path.exists(f"{env.R}/Reports/report.docx")
+    all_kept = sorted(read(os.path.join(r, f)) for r, _, fs in os.walk(vroot) for f in fs)
+    assert all_kept == ["v1", "v2"] and len(os.listdir(vroot)) == 2   # a new moment folder
     assert env.bin.items == []                                  # nothing went to the bin
     assert engine.VERSIONS_DIR not in os.listdir(env.L)         # versions never sync back
 
 
-def test_versions_keep_only_the_newest_ten(env):
+def test_one_moment_folder_per_sync_run(env):
     import engine
     p = link(env, "update", versions=True)
-    for i in range(14):
-        write(f"{env.L}/a.txt", f"v{i}", mtime=1_000_000 + i * 10)
-        env.eng.reconcile(p)
-    vdir = os.path.join(env.R, engine.VERSIONS_DIR)
-    kept = sorted(read(os.path.join(vdir, f)) for f in os.listdir(vdir))
-    assert len(kept) == engine.KEEP_VERSIONS
-    assert "v0" not in kept and "v12" in kept and read(f"{env.R}/a.txt") == "v13"
+    for n in ("a.txt", "sub/b.txt", "sub/deeper/c.txt"):
+        write(f"{env.L}/{n}", "old", mtime=1_000_000)
+    env.eng.reconcile(p)
+    for n in ("a.txt", "sub/b.txt", "sub/deeper/c.txt"):
+        write(f"{env.L}/{n}", "new", mtime=1_000_100)
+    env.eng.reconcile(p)                                        # one run replaces three files
+    vroot = os.path.join(env.R, engine.VERSIONS_DIR)
+    (moment,) = os.listdir(vroot)
+    assert tree(os.path.join(vroot, moment)) == {
+        "a.txt": "old", "sub/": None, "sub/b.txt": "old", "sub/deeper/": None,
+        "sub/deeper/c.txt": "old"}
 
+
+def test_removed_folder_is_kept_whole(env):
+    import engine
+    p = link(env, "mirror", versions=True)
+    write(f"{env.L}/Project/x.txt", "x")
+    write(f"{env.L}/Project/y.txt", "y")
+    env.eng.reconcile(p)
+    shutil.rmtree(f"{env.L}/Project")
+    env.eng.reconcile(p)
+    vroot = os.path.join(env.R, engine.VERSIONS_DIR)
+    (moment,) = os.listdir(vroot)
+    assert tree(os.path.join(vroot, moment)) == {"Project/": None, "Project/x.txt": "x",
+                                                  "Project/y.txt": "y"}
+
+
+def test_moment_names_count_up_within_a_second(tmp_path):
+    import engine
+    t = time.time()
+    names = [engine.new_moment(str(tmp_path), t) for _ in range(3)]
+    assert [n[-3:] for n in names] == ["001", "002", "003"]
+    assert len({n[:-4] for n in names}) == 1
+
+
+def test_old_versions_are_removed_after_their_days(tmp_path):
+    import engine
+    root = str(tmp_path)
+    day = 86400
+    now = time.time()
+    old = engine.new_moment(root, now - 40 * day)
+    recent = engine.new_moment(root, now - 5 * day)
+    stray = os.path.join(root, engine.VERSIONS_DIR, "my notes")   # not ours: never touched
+    os.makedirs(stray)
+    assert engine.prune_versions(root, 30, now) == 1
+    left = os.listdir(os.path.join(root, engine.VERSIONS_DIR))
+    assert recent in left and old not in left and "my notes" in left
+    assert engine.prune_versions(root, 0, now + 1000 * day) == 0   # 0 days = keep forever
 
 def test_mirror_guards_against_an_emptied_main(env):
     p = link(env, "mirror")
@@ -581,8 +624,8 @@ def test_export_and_import_round_trip(tmp_path):
     from store import Job, Member, export_settings, read_settings_file
     cfg = Config(theme="dark", jobs=[
         Job(main="D:/Final project", paused=True,
-            members=[Member("E:/Backup", "update", True), Member("F:/Copy", "mirror")])])
-    out = tmp_path / "SyncMate folder syncs.json"
+            members=[Member("E:/Backup", "update", True, keep_days=90), Member("F:/Copy", "mirror")])])
+    out = tmp_path / "SyncMate folder syncs.kiru"
     assert export_settings(str(out), cfg, "2.2") == 1
     raw = json.loads(out.read_text(encoding="utf-8"))
     assert raw["kind"] == "SyncMate folder syncs" and raw["app_version"] == "2.2"
@@ -590,8 +633,8 @@ def test_export_and_import_round_trip(tmp_path):
     back = read_settings_file(str(out))
     j = back.jobs[0]
     assert back.theme == "dark" and j.main == "D:/Final project" and j.paused
-    assert [(m.path, m.mode, m.versions) for m in j.members] == [
-        ("E:/Backup", "update", True), ("F:/Copy", "mirror", False)]
+    assert [(m.path, m.mode, m.versions, m.keep_days) for m in j.members] == [
+        ("E:/Backup", "update", True, 90), ("F:/Copy", "mirror", False, 30)]
     assert j.id != cfg.jobs[0].id                             # fresh ids on import
 
 
@@ -605,3 +648,14 @@ def test_import_rejects_other_files(tmp_path):
     junk.write_bytes(b"\x89PNG...")
     with pytest.raises(ValueError):
         read_settings_file(str(junk))
+
+
+def test_main_keeps_versions_for_the_longest_wish():
+    from store import Job, Member
+    from watcher import _keep_days_for_main
+    j = Job(main="M", members=[Member("A", versions=True, keep_days=7),
+                               Member("B", versions=True, keep_days=90),
+                               Member("C", versions=False, keep_days=1)])
+    assert _keep_days_for_main(j) == 90
+    j.members.append(Member("D", versions=True, keep_days=0))
+    assert _keep_days_for_main(j) == 0                         # one 'forever' wins

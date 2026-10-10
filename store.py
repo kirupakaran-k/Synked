@@ -35,7 +35,32 @@ MODE_LABELS = {
     "update": "Update  (Main → folder, add & update only)",
     "collect": "Collect  (folder → Main, add & update only)",
 }
-VERSION_LABELS = {False: "Old files → Recycle Bin", True: "Keep old versions"}
+# What happens to replaced/removed files in a connected folder: (keep versions?, days to keep)
+# 0 days = keep forever.
+VERSION_CHOICES = [
+    ((False, 30), "Old files → Recycle Bin"),
+    ((True, 7), "Keep old versions 7 days"),
+    ((True, 30), "Keep old versions 30 days"),
+    ((True, 90), "Keep old versions 90 days"),
+    ((True, 365), "Keep old versions 1 year"),
+    ((True, 0), "Keep old versions forever"),
+]
+
+
+def version_label(versions: bool, keep_days: int) -> str:
+    if not versions:
+        return VERSION_CHOICES[0][1]
+    for (v, d), label in VERSION_CHOICES:
+        if v and d == keep_days:
+            return label
+    return f"Keep old versions {keep_days} days"
+
+
+def version_choice(label: str) -> tuple:
+    for choice, text in VERSION_CHOICES:
+        if text == label:
+            return choice
+    return (False, 30)
 
 
 def _new_id() -> str:
@@ -52,6 +77,7 @@ class Pair:
     id: str = field(default_factory=_new_id)
     mode: str = "two-way"     # see MODES
     versions: bool = False    # keep old versions instead of using the Recycle Bin
+    keep_days: int = 30       # how long kept versions stay (0 = forever)
     job: str = ""             # the job this link belongs to
     names: tuple = ("Main", "folder")
 
@@ -63,6 +89,7 @@ class Member:
     mode: str = "two-way"
     versions: bool = False
     id: str = field(default_factory=_new_id)
+    keep_days: int = 30   # how long kept versions stay (0 = forever)
 
 
 @dataclass
@@ -75,7 +102,8 @@ class Job:
 
     def links(self) -> list:
         return [Pair(left=self.main, right=m.path, paused=self.paused, id=m.id, mode=m.mode,
-                     versions=m.versions, job=self.id, names=("Main", _name(m.path)))
+                     versions=m.versions, keep_days=m.keep_days, job=self.id,
+                     names=("Main", _name(m.path)))
                 for m in self.members]
 
     def copy(self) -> "Job":
@@ -109,7 +137,8 @@ class Config:
         for j in raw.get("jobs", []):
             members = [Member(path=m["path"], id=m.get("id") or _new_id(),
                               mode=m.get("mode") if m.get("mode") in MODES else "two-way",
-                              versions=bool(m.get("versions", False)))
+                              versions=bool(m.get("versions", False)),
+                              keep_days=max(0, int(m.get("keep_days", 30))))
                        for m in j.get("members", [])]
             jobs.append(Job(main=j["main"], members=members, paused=j.get("paused", False),
                             id=j.get("id") or _new_id()))
@@ -229,6 +258,7 @@ class StateDB:
 # --------------------------------------------------------------------------- export / import
 
 EXPORT_KIND = "SyncMate folder syncs"
+CONFIG_EXT = ".kiru"   # exported folder sync configurations (JSON inside)
 
 
 def export_settings(path: str, config: Config, version: str = "") -> int:
@@ -238,7 +268,8 @@ def export_settings(path: str, config: Config, version: str = "") -> int:
     data = {"kind": EXPORT_KIND, "app_version": version,
             "exported": time.strftime("%Y-%m-%d %H:%M:%S"), "theme": config.theme,
             "jobs": [{"main": j.main, "paused": j.paused,
-                      "members": [{"path": m.path, "mode": m.mode, "versions": m.versions}
+                      "members": [{"path": m.path, "mode": m.mode, "versions": m.versions,
+                                   "keep_days": m.keep_days}
                                   for m in j.members]} for j in config.jobs]}
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -266,5 +297,6 @@ def read_settings_file(path: str) -> Config:
         raise ValueError("That file is damaged or incomplete.") from e
     for j in cfg.jobs:
         j.id = _new_id()
-        j.members = [Member(path=m.path, mode=m.mode, versions=m.versions) for m in j.members]
+        j.members = [Member(path=m.path, mode=m.mode, versions=m.versions,
+                            keep_days=m.keep_days) for m in j.members]
     return cfg

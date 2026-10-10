@@ -11,7 +11,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from store import MODE_LABELS, MODES, VERSION_LABELS, Member
+from store import MODE_LABELS, MODES, VERSION_CHOICES, Member, version_choice, version_label
 from ui_common import (ONEDRIVE, PALETTE, STATE_COLOR, describe, elide, folder_name,
                        open_folder, pretty_path, progress_detail)
 
@@ -153,9 +153,10 @@ class JobCard:
         tip = ("Two-way: changes flow both ways; if both sides changed, the newer one wins. "
                "Mirror: the folder becomes an exact copy of Main (its own changes are undone). "
                "Update / Collect: new and changed files are copied one way and nothing is ever "
-               "deleted, good for backups. Replaced or removed files go to the Recycle Bin, or "
-               "are kept in a hidden .syncmate-versions folder (last 10 of each file). Folders "
-               "that don't exist yet are created; you can also drag folders onto the boxes.")
+               "deleted, good for backups. Replaced or removed files go to the Recycle Bin, or are "
+               "kept in the folder's hidden .syncmate-versions folder: one dated folder per "
+               "sync, kept for the days you choose. Folders that don't exist yet are created; "
+               "you can also drag folders onto the boxes.")
         self.tip = app.tint(ttk.Label(ed, text=tip, style="Card.Muted.TLabel", justify="left"))
         self.tip.grid(row=6, column=0, sticky="w", pady=(px(12), 0))
         ed.bind("<Configure>", lambda e: self.tip.configure(wraplength=max(200, e.width - 4)))
@@ -218,7 +219,8 @@ class JobCard:
         row = {"frame": fr, "id": member.id if member else None,
                "path": tk.StringVar(value=member.path if member else ""),
                "mode": tk.StringVar(value=MODE_LABELS[member.mode if member else "two-way"]),
-               "versions": tk.StringVar(value=VERSION_LABELS[bool(member and member.versions)])}
+               "versions": tk.StringVar(value=version_label(bool(member and member.versions),
+                                                            member.keep_days if member else 30))}
         box = ttk.Combobox(fr, textvariable=row["path"], values=self._suggestions())
         box.grid(row=0, column=0, sticky="ew")
         row["box"] = box
@@ -232,8 +234,8 @@ class JobCard:
         opts.grid(row=1, column=0, columnspan=4, sticky="w", pady=(px(6), 0))
         ttk.Combobox(opts, textvariable=row["mode"], state="readonly", width=38,
                      values=[MODE_LABELS[m] for m in MODES]).pack(side="left")
-        ttk.Combobox(opts, textvariable=row["versions"], state="readonly", width=24,
-                     values=[VERSION_LABELS[False], VERSION_LABELS[True]]).pack(
+        ttk.Combobox(opts, textvariable=row["versions"], state="readonly", width=28,
+                     values=[label for _, label in VERSION_CHOICES]).pack(
             side="left", padx=(px(8), 0))
         app.drop_target(box, lambda paths: self.on_drop(row, paths),
                         lambda over: box.state(["focus"] if over else ["!focus"]))
@@ -346,8 +348,9 @@ class JobCard:
             path = r["path"].get().strip().strip('"')
             if not path:
                 continue
+            versions, keep_days = version_choice(r["versions"].get())
             members.append(Member(path=path, mode=mode_of.get(r["mode"].get(), "two-way"),
-                                  versions=r["versions"].get() == VERSION_LABELS[True],
+                                  versions=versions, keep_days=keep_days,
                                   **({"id": r["id"]} if r["id"] else {})))
         return main, members
 
@@ -411,7 +414,8 @@ class JobCard:
         if not same_path(main or ".", j.main) or len(members) != len(j.members):
             return False
         return all(m.id == o.id and same_path(m.path, o.path) and m.mode == o.mode
-                   and m.versions == o.versions for m, o in zip(members, j.members))
+                   and m.versions == o.versions and (not m.versions or m.keep_days == o.keep_days)
+                   for m, o in zip(members, j.members))
 
     def apply(self):
         main, members = self.values()

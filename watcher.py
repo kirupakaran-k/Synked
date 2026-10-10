@@ -20,7 +20,8 @@ from dataclasses import dataclass, field
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from engine import Engine, LooksEmpty, Progress, RootMissing, default_trash, rel_is_ignored
+from engine import (Engine, LooksEmpty, Progress, RootMissing, default_trash, prune_versions,
+                    rel_is_ignored)
 from store import MODES, Config, Job, Member, StateDB, data_dir
 
 DEBOUNCE = 1.5          # seconds of quiet before syncing a burst of changes
@@ -455,6 +456,18 @@ class Controller:
             return
         self._process(job.id, _Pending(full=True), allow_empty_link=allow_empty_link)
 
+    def _prune(self, job: Job) -> None:
+        """Remove kept versions older than each folder's chosen number of days."""
+        removed = 0
+        for m in job.members:
+            if m.versions:
+                removed += prune_versions(m.path, m.keep_days)
+        if any(m.versions for m in job.members):
+            removed += prune_versions(job.main, _keep_days_for_main(job))
+        if removed:
+            self._log(job.id, "info", f"Cleared {removed} old version folder"
+                                      f"{'s' if removed != 1 else ''} past their keep time")
+
     def _health_check(self) -> None:
         for j in self.jobs():
             if j.paused:
@@ -507,6 +520,7 @@ class Controller:
                     if not changes:
                         break
                 self._last_full[jid] = time.monotonic()
+                self._prune(job)
             else:
                 by_id = {link.id: link for link in links}
                 rels = {w: set(s) for w, s in pend.rels.items()}
@@ -556,13 +570,21 @@ class Controller:
             self._set(jid, state="synced", message="", last_sync=time.time(), progress=None)
 
 
+def _keep_days_for_main(job: Job) -> int:
+    """Main's kept versions serve every folder that keeps versions: use the longest wish
+    (0 = forever wins)."""
+    days = [m.keep_days for m in job.members if m.versions]
+    return 0 if not days or 0 in days else max(days)
+
+
 def _member(m) -> Member:
     if isinstance(m, Member):
         return Member(path=os.path.abspath(m.path), mode=m.mode if m.mode in MODES else "two-way",
-                      versions=bool(m.versions), id=m.id)
-    path, mode, versions = (tuple(m) + ("two-way", False))[:3]
+                      versions=bool(m.versions), id=m.id, keep_days=max(0, int(m.keep_days)))
+    defaults = ("", "two-way", False, 30)          # (path, mode, versions, keep_days)
+    path, mode, versions, keep_days = tuple(m)[:4] + defaults[len(tuple(m)[:4]):]
     return Member(path=os.path.abspath(path), mode=mode if mode in MODES else "two-way",
-                  versions=bool(versions))
+                  versions=bool(versions), keep_days=max(0, int(keep_days)))
 
 
 def _collapse(rels: set) -> list:

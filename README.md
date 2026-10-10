@@ -10,7 +10,7 @@ moving it.
    (or from python.org; tick **Add python.exe to PATH**).
 2. Double-click **`build.bat`** in the version's folder. A couple of minutes later the app is
    ready in a folder named after its version, **outside** the version folders, e.g.
-   `D:\syncmate\build 2.2\SyncMate.exe` (with its icon and build log).
+   `D:\syncmate\build 2.3\SyncMate.exe` (with its icon and build log).
 
    The build tools (Python libraries, about 50 MB) are kept in
    `%LOCALAPPDATA%\SyncMate\build-env`, not in your SyncMate folder, and are reused by every
@@ -23,7 +23,7 @@ moving it.
    wrong, the window stays open so you can read why. If *Start with Windows* is on, it
    follows to the newest build the next time that build runs.
 
-3. Run `build 2.2\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+3. Run `build 2.3\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
    **connected folders**, and click **Start syncing**. You can also **drag folders from
    File Explorer** onto the boxes or onto the window (several at once: the first becomes
    Main, the rest connected folders).
@@ -35,7 +35,7 @@ moving it.
    or Remove it.
 
    The **⚙ settings** button (top right) has Start with Windows, the Theme slider
-   (Auto / Light / Dark), **Export… / Import…** for your folder syncs, and the full
+   (Auto / Light / Dark), **Export / Import** of your folder sync configurations, and the full
    activity log.
 
 You can also run it without building: `py app.py`
@@ -55,9 +55,22 @@ an edit in one connected folder reaches Main and from there the other folders.
 
 **Old files** (also per connected folder):
 - **Recycle Bin**: files that are removed, or a copy's own edits that get overwritten, go to the Recycle Bin.
-- **Keep old versions**: every replaced or removed file is kept in a hidden
-  `.syncmate-versions` folder inside that folder, named with the date and time,
-  e.g. `report [2026-10-10 123805].docx`. The newest 10 versions of each file are kept.
+- **Keep old versions** for **7 days, 30 days, 90 days, 1 year or forever**: every replaced or
+  removed file is moved into that folder's hidden `.syncmate-versions` folder instead. Each
+  sync gets its own folder there, named by date, time and a number, with the old files
+  inside in their usual subfolders:
+
+  ```
+  Backup\.syncmate-versions\
+      2026-10-09_17-42-10_001\Reports\budget.xlsx
+      2026-10-10_12-38-05_001\Reports\budget.xlsx
+                              \Notes\plan.docx
+  ```
+
+  To get something back, open the dated folder and copy the file out. Dated folders older
+  than the chosen number of days are removed automatically after each full sync. Main's
+  `.syncmate-versions` (used when two-way or collect folders replace files in Main) is kept
+  for the longest time any of its folders asks for.
 
 ## How it behaves
 
@@ -90,13 +103,14 @@ choose **Always keep on this device**.
 Your folder syncs (`config.json`), their sync history (`state.db`) and the log
 (`syncmate.log`) are kept in `%APPDATA%\SyncMate`.
 
-**⚙ settings → Export…** saves all your folder syncs (folders, sync types, old-files
-options, paused or not) and the theme to a `.json` file wherever you like.
-**Import…** loads such a file, on this PC or another one. You can **replace** your current
-syncs or **add** to them; syncs that would overlap folders already being synced are
-skipped. Folders that don't exist on this PC yet are imported anyway: those syncs wait and
-start by themselves when the folders appear. Sync history isn't exported, because it
-belongs to this PC's copies of the files; after an import the folders are compared once.
+**⚙ settings → Folder sync configurations → Export** saves all your folder syncs (folders,
+sync types, old-files options, paused or not) and the theme to a **`.kiru`** file wherever you
+like. **Import** loads such a file (or an older `.json` export), on this PC or another one.
+You can **replace** your current syncs or **add** to them; syncs that would overlap folders
+already being synced are skipped. Folders that don't exist on this PC yet are imported
+anyway: those syncs wait and start by themselves when the folders appear. Sync history isn't
+exported, because it belongs to this PC's copies of the files; after an import the folders
+are compared once.
 
 ## Files
 
