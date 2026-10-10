@@ -1,4 +1,4 @@
-"""Draws the SyncMate icon: a retro striped sync loop in blues, on a cream tile.
+"""Draws the SyncMate icon: a retro striped sync loop in blues, on a pale-blue tile.
 
 The logo itself never changes; a small coloured dot in the corner shows the status
 (no dot = everything is in sync).
@@ -17,7 +17,7 @@ COLORS = {
     "error": "#D64541",
 }
 
-CREAM = "#F3E6CF"
+TILE = "#DCEBF8"  # pale blue
 STRIPES = ("#1F3A5F", "#2F6FB0", "#7DB8E3")  # outer → inner: navy, blue, sky
 ARROW = "#1F3A5F"
 
@@ -31,7 +31,7 @@ def _logo() -> Image.Image:
     S = _S
     im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    d.rounded_rectangle((24, 24, S - 24, S - 24), radius=int(S * 0.22), fill=CREAM)
+    d.rounded_rectangle((24, 24, S - 24, S - 24), radius=int(S * 0.22), fill=TILE)
 
     c, w = S / 2, 58
     radii = (330, 272, 214)
