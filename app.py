@@ -18,7 +18,7 @@ from PIL import ImageTk  # noqa: E402
 from icon import COLORS, make_icon, save_ico  # noqa: E402
 from store import data_dir  # noqa: E402
 from widgets import SlideSwitch, dots, gear, plus  # noqa: E402
-from cards import PairCard  # noqa: E402
+from cards import JobCard  # noqa: E402
 from ui_common import IS_WIN, PALETTE, open_folder  # noqa: E402
 from watcher import Controller  # noqa: E402
 
@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover
     darkdetect = None
 
 APP = "SyncMate"
-VERSION = "1.4"  # shown in Settings, so you can tell which build is running
+VERSION = "2.0"  # shown in Settings, so you can tell which build is running
 SHOW_FLAG = os.path.join(data_dir(), "show.flag")   # "please show your window"
 QUIT_FLAG = os.path.join(data_dir(), "quit.flag")   # "please quit" (used by build.bat)
 
@@ -129,7 +129,7 @@ class App:
         root.withdraw()
         root.title(APP)
         self.S = root.winfo_fpixels("1i") / 96  # display scale
-        root.geometry(f"{self.px(760)}x{self.px(500)}")
+        root.geometry(f"{self.px(820)}x{self.px(640)}")
         root.minsize(self.px(560), self.px(380))
         self._set_window_icon()
 
@@ -189,7 +189,7 @@ class App:
             pass
 
     def on_main_drop(self, paths) -> None:
-        """Folders dropped on the main window: open (or fill) the Add folder pair dialog."""
+        """Folders dropped on the main window: open (or fill) the new folder sync card."""
         folders = [p for p in paths if os.path.isdir(p)]
         if not folders:
             self._flash_summary("Drop folders, not files, to add a folder sync.")
@@ -441,33 +441,35 @@ class App:
     # ---------------------------------------------------------------- pair cards
 
     def refresh(self):
-        pairs = self.ctrl.pairs()
+        jobs = self.ctrl.jobs()
         snap = self.ctrl.snapshot()
-        sig = [(p.id, p.left, p.right) for p in pairs] + (["new"] if self.draft_open else [])
+        sig = [(j.id, j.main, tuple((m.id, m.path, m.mode, m.versions) for m in j.members))
+               for j in jobs] + (["new"] if self.draft_open else [])
         if sig != self.card_sig:
-            self._rebuild(pairs)
+            self._rebuild(jobs)
             self.card_sig = sig
-        for p in pairs:
+        for p in jobs:
             st, card = snap.get(p.id), self.cards.get(p.id)
             if st is not None and card is not None:
                 card.update(st, p)
-        self._update_summary(pairs, snap)
+        self._update_summary(jobs, snap)
 
-    def _rebuild(self, pairs):
+    def _rebuild(self, jobs):
         draft = self.cards.get("new")
-        kept = draft.values() if draft else None
+        kept = draft.values() if draft else None   # (main, [Member]) typed so far
         for w in self.list.winfo_children():
             w.destroy()
         self.cards = {}
         row = 0
         if self.draft_open:
-            card = self.cards["new"] = PairCard(self, self.list, row)
+            card = self.cards["new"] = JobCard(self, self.list, row)
             if kept:
-                card.a.set(kept[0])
-                card.b.set(kept[1])
+                card.main.set(kept[0])
+                for m in kept[1]:
+                    card._add_row(m)
             row += 1
-        for p in pairs:
-            self.cards[p.id] = PairCard(self, self.list, row, p)
+        for j in jobs:
+            self.cards[j.id] = JobCard(self, self.list, row, j)
             row += 1
         if not self.cards:
             self._empty_state()
@@ -526,7 +528,7 @@ class App:
         if prefill:
             card.fill(prefill)
         self.canvas.yview_moveto(0)
-        card.a_box.focus_set()
+        card.main_box.focus_set()
 
     def close_draft(self) -> None:
         self._draft = False
@@ -540,25 +542,28 @@ class App:
         top = widget.winfo_y()
         bottom = top + widget.winfo_height()
         view_top, view_bottom = (f * total for f in self.canvas.yview())
+        view_h = view_bottom - view_top
         if bottom > view_bottom:
-            self.canvas.yview_moveto(max(0, bottom - (view_bottom - view_top)) / total)
+            # show the whole card if it fits, otherwise its top (the header stays visible)
+            self.canvas.yview_moveto((top if bottom - top > view_h else bottom - view_h) / total)
         elif top < view_top:
             self.canvas.yview_moveto(top / total)
 
-    def prepare_folders(self, a: str, b: str, ignore=None):
-        """Check two folders can be synced; create ones that don't exist yet.
+    def prepare_folders(self, main: str, members: list, ignore=None):
+        """Check a job's folders can be synced; create ones that don't exist yet.
         Returns an error message, or None if all is well."""
         created = []
-        if a and b:
-            for p in (a, b):
-                if not os.path.exists(p) and os.path.isdir(os.path.dirname(os.path.abspath(p))):
+        if main and members:
+            for p in [main] + list(members):
+                if (p and not os.path.exists(p) and p not in created
+                        and os.path.isdir(os.path.dirname(os.path.abspath(p)))):
                     created.append(p)
         try:
             for p in created:
                 os.makedirs(p)
         except OSError as e:
             return f"Couldn't create “{p}”: {e.strerror}"
-        problem = self.ctrl.validate(a, b, ignore=ignore)
+        problem = self.ctrl.validate(main, list(members), ignore=ignore)
         if problem:
             for p in created:
                 try:
@@ -567,21 +572,25 @@ class App:
                     pass
         return problem
 
-    def confirm_delete(self, pid):
-        pair = next((p for p in self.ctrl.pairs() if p.id == pid), None)
-        st = self.ctrl.snapshot().get(pid)
-        if not pair or not st:
+    def confirm_delete(self, jid):
+        job = next((j for j in self.ctrl.jobs() if j.id == jid), None)
+        st = self.ctrl.snapshot().get(jid)
+        if not job or not st:
             return
-        empty = pair.left if st.empty_side == 0 else pair.right
-        other = pair.right if st.empty_side == 0 else pair.left
+        m = next((m for m in job.members if m.id == st.empty_link), None)
+        if m is None:
+            return
+        empty = job.main if st.empty_side == 0 else m.path
+        other = m.path if st.empty_side == 0 else job.main
         if messagebox.askyesno(
                 APP, f"{empty} is empty.\n\nDelete the same files in\n{other}?\n\n"
-                     "They'll go to the Recycle Bin.", icon="warning", parent=self.root):
-            self.ctrl.resolve_empty(pid, True)
+                     "They'll go to the Recycle Bin (or old versions).", icon="warning",
+                parent=self.root):
+            self.ctrl.resolve_empty(jid, True)
 
     def _update_summary(self, pairs, snap):
         if not pairs:
-            text = "Add a folder sync and SyncMate keeps the two folders identical."
+            text = "Add a folder sync and SyncMate keeps your folders identical."
         else:
             overall = self.ctrl.overall()
             states = {st.state for st in snap.values()}
@@ -656,12 +665,12 @@ class App:
         later = self.q.put
 
         def all_paused(_=None):
-            ps = self.ctrl.pairs()
+            ps = self.ctrl.jobs()
             return bool(ps) and all(p.paused for p in ps)
 
         def toggle_all():
             pause = not all_paused()
-            for p in self.ctrl.pairs():
+            for p in self.ctrl.jobs():
                 self.ctrl.set_paused(p.id, pause)
 
         menu = pystray.Menu(

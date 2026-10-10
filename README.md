@@ -15,20 +15,40 @@ moving it.
    (letting it finish any copy in progress), deletes the old version, builds the new
    one, starts it again if it was running, and closes its own window when done.
    If something goes wrong, the window stays open so you can read why.
-3. Run `SyncMate.exe`, click **Add folder sync**, pick the two folders, and click
-   **Start syncing**. You can also **drag folders from File Explorer**: onto the Folder A /
-   Folder B boxes, or straight onto the SyncMate window (drop two at once to fill both).
+3. Run `SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+   **connected folders**, and click **Start syncing**. You can also **drag folders from
+   File Explorer** onto the boxes or onto the window (several at once: the first becomes
+   Main, the rest connected folders).
 
    Each folder sync shows live progress while it copies (current file, items and MB done,
    and a progress bar), then the time and day it last synced. **Click a folder sync** (or
-   its ⋮ button) to expand it: change either folder and **Apply**, Pause / Resume,
-   Sync now, open the folders, or Remove it.
-   Turn on **Start with Windows** so it runs in the background from then on.
-   The **⚙ settings** button (top right) has Start with Windows and the Theme slider:
-   Auto (follows Windows), Light or Dark.
+   its ⋮ button) to expand it: change folders, sync types and options, add or remove
+   connected folders and **Apply**; Pause / Resume, Sync now, see its **recent activity**,
+   or Remove it.
+
+   The **⚙ settings** button (top right) has Start with Windows, the Theme slider
+   (Auto / Light / Dark) and the full activity log.
 
 You can also run it without building: `py app.py`
 (after `py -m pip install -r requirements.txt`).
+
+## Sync types (chosen per connected folder)
+
+Every connected folder syncs with the job's **Main folder**. Changes pass through Main, so
+an edit in one connected folder reaches Main and from there the other folders.
+
+| Type | Direction | What it does |
+|---|---|---|
+| **Two-way** | Main ⇄ folder | Changes flow both ways; if both sides changed, the newer one wins |
+| **Mirror** | Main → folder | The folder becomes an exact copy of Main (master/slave): extra files are removed and its own edits are undone |
+| **Update** | Main → folder | Incremental: new and changed files are copied; nothing is ever deleted. Good for backups |
+| **Collect** | folder → Main | The same, the other way: new and changed files are added to Main, never deleted |
+
+**Old files** (also per connected folder):
+- **Recycle Bin**: files that are removed, or a copy's own edits that get overwritten, go to the Recycle Bin.
+- **Keep old versions**: every replaced or removed file is kept in a hidden
+  `.syncmate-versions` folder inside that folder, named with the date and time,
+  e.g. `report [2026-10-10 123805].docx`. The newest 10 versions of each file are kept.
 
 ## How it behaves
 
@@ -69,11 +89,11 @@ again so Windows picks up the new location.
 | File | Purpose |
 |---|---|
 | `app.py` | Window, tray icon, settings panel, start-with-Windows |
-| `cards.py` | The folder-sync cards: status, live progress, and the expand-to-edit panel |
+| `cards.py` | The folder-sync cards: status, live progress, recent activity, and the expand-to-edit panel |
 | `ui_common.py` | Shared helpers for the window (paths, times, sizes, colours) |
 | `widgets.py` | The sliding theme switch and the gear icon |
-| `watcher.py` | Watches folders, batches changes, runs syncs in the background |
-| `engine.py` | The sync rules (what to copy, delete or rename) |
-| `store.py` | Settings and sync history |
+| `watcher.py` | Watches every folder of every job, batches changes, runs syncs in the background |
+| `engine.py` | The sync rules for each sync type, and version keeping |
+| `store.py` | Jobs, settings and sync history (older single-pair settings are converted automatically) |
 | `icon.py` | Draws the icon |
 | `tests/` | Automated tests: `py -m pytest tests` |

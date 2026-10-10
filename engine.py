@@ -7,6 +7,15 @@ after the last successful sync. That tells us which side changed:
     both sides changed     -> the newer file wins; the older one goes to the Recycle Bin
     deleted vs. modified   -> the modification wins (nothing is lost)
 
+That is the "two-way" type. Each connected folder can instead use:
+
+    mirror   Main -> folder: the folder becomes an exact copy of Main
+    update   Main -> folder: new and changed files are copied; nothing is ever deleted
+    collect  folder -> Main: the same, in the other direction
+
+Replaced or deleted files go to the Recycle Bin, or, if the folder keeps versions,
+into a hidden ".syncmate-versions" folder (the last 10 versions of each file).
+
 Every delete goes to the Recycle Bin, and every copy is written to a temporary
 file first and then swapped in, so a crash never leaves a half-written file.
 """
@@ -35,6 +44,8 @@ _IGNORED = [p.lower() for p in IGNORED]
 
 TEMP_PREFIX = ".syncmate-"
 FALLBACK_BIN = ".syncmate-recycle"
+VERSIONS_DIR = ".syncmate-versions"
+KEEP_VERSIONS = 10
 MTIME_TOLERANCE_NS = 2_000_000_000  # FAT/exFAT drives store times in 2-second steps
 EMPTY_GUARD_MIN = 20  # a side that suddenly lost >= this many items makes us stop and ask
 
@@ -211,8 +222,10 @@ class Engine:
         scans = (scan(roots[0], rel), scan(roots[1], rel))
         base = self.db.get_subtree(pair.id, key_of(rel))
 
+        mode = getattr(pair, "mode", "two-way")
+        guarded = (0, 1) if mode == "two-way" else (0,) if mode == "mirror" else ()
         if rel == "" and len(base) >= EMPTY_GUARD_MIN and not allow_empty:
-            for i in (0, 1):
+            for i in guarded:
                 if not scans[i] and scans[1 - i]:
                     raise LooksEmpty(i, roots[i])
 
@@ -242,9 +255,9 @@ class Engine:
                 item_rel = (scans[0].get(k) or scans[1].get(k) or base[k])[0]
                 res.failed.append(item_rel)
                 if isinstance(e, Busy):
-                    self.log(pair.id, "info", f"Waiting for “{item_rel}” (in use)")
+                    self._log(pair, "info", f"Waiting for “{item_rel}” (in use)")
                 else:
-                    self.log(pair.id, "error", f"Couldn't sync “{item_rel}”: {e.strerror or e}")
+                    self._log(pair, "error", f"Couldn't sync “{item_rel}”: {e.strerror or e}")
         self.db.commit()
         if todo:
             prog.items_done, prog.bytes_done, prog.rel = prog.items_total, prog.bytes_total, ""
@@ -277,6 +290,9 @@ class Engine:
     def mirror_move(self, pair: Pair, side: int, src_rel: str, dst_rel: str) -> bool:
         """A rename/move happened on `side`; repeat it on the other side instead of
         deleting and re-copying. Returns False if it's not safe, so a normal sync runs."""
+        mode = getattr(pair, "mode", "two-way")
+        if not (mode == "two-way" or (mode == "mirror" and side == 0)):
+            return False  # update/collect never delete, so a rename is just a new file
         roots = (pair.left, pair.right)
         other = 1 - side
         ks, kd = key_of(src_rel), key_of(dst_rel)
@@ -307,7 +323,7 @@ class Engine:
 
         self.db.move_subtree(pair.id, ks, kd, dst_rel)
         self.db.commit()
-        self.log(pair.id, "info", f"Renamed “{src_rel}” → “{dst_rel}”")
+        self._log(pair, "info", f"Renamed “{src_rel}” → “{dst_rel}” in {self._name(pair, other)}")
         return True
 
     # ------------------------------------------------------------------ internals
@@ -327,6 +343,13 @@ class Engine:
             changed = [cur[i] != was[i] for i in (0, 1)]
         if not (changed[0] or changed[1]):
             return False
+
+        self._was = was   # what both sides looked like at the last sync (for _copy_over)
+        mode = getattr(pair, "mode", "two-way")
+        if mode == "mirror":
+            return self._mirror(pair, k, rel, 0, cur, res)
+        if mode in ("update", "collect"):
+            return self._update(pair, k, rel, 0 if mode == "update" else 1, cur, changed, res)
 
         if changed[0] != changed[1]:
             src = 0 if changed[0] else 1
@@ -349,13 +372,13 @@ class Engine:
         else:
             winner = 0 if a[2] >= b[2] else 1
             loser = 1 - winner
-            self.trash(os.path.join(roots[loser], rel), roots[loser])
+            where = self._discard(pair, loser, rel)
             cur[loser] = None
             self._copy_over(pair, k, rel, winner, cur, res, quiet=True)
             res.replaced += 1
-            self.log(pair.id, "warn",
-                     f"“{rel}” changed on both sides — kept the newer one, "
-                     f"older copy is in the Recycle Bin")
+            self._log(pair, "warn", f"“{rel}” changed in both Main and "
+                                    f"{self._name(pair, 1)}. Kept the newer one; the older "
+                                    f"copy is in {where}")
         return False
 
     def _one_way(self, pair, k, rel, src, cur, scans, base, res) -> bool:
@@ -375,12 +398,76 @@ class Engine:
             os.makedirs(os.path.join(roots[src], rel), exist_ok=True)
             self._record(pair, k, rel)
             return False
-        self._report("recycle", rel, dst)
-        self.trash(os.path.join(roots[dst], rel), roots[dst])
+        self._remove(pair, k, rel, dst, res)
+        return bool(d[0])
+
+    # ---- the other sync types ---------------------------------------------------
+
+    def _mirror(self, pair, k, rel, src, cur, res) -> bool:
+        """Make the other side an exact copy of `src`."""
+        dst = 1 - src
+        s, d = cur[src], cur[dst]
+        if s is None:
+            if d is None:
+                self.db.delete_subtree(pair.id, k)
+                return False
+            self._remove(pair, k, rel, dst, res)
+            return bool(d[0])
+        if d is not None and s[0] and d[0]:
+            self._record(pair, k, rel)
+        elif (d is not None and not s[0] and not d[0]
+              and self._same_file((pair.left, pair.right), rel, *cur)):
+            self._record(pair, k, rel)
+        else:
+            self._copy_over(pair, k, rel, src, cur, res)
+        return False
+
+    def _update(self, pair, k, rel, src, cur, changed, res) -> bool:
+        """Copy new and changed files from `src` to the other side; never delete."""
+        dst = 1 - src
+        s, d = cur[src], cur[dst]
+        if s is None:
+            self.db.delete_subtree(pair.id, k)   # gone from the source: leave the copy be
+            return False
+        if d is None:
+            self._copy_over(pair, k, rel, src, cur, res)
+        elif s[0] and d[0]:
+            self._record(pair, k, rel)
+        elif not changed[src]:
+            if s[0] == d[0]:
+                self._record(pair, k, rel)       # only the copy was edited: leave it alone
+        elif not s[0] and not d[0] and self._same_file((pair.left, pair.right), rel, *cur):
+            self._record(pair, k, rel)
+        else:
+            self._copy_over(pair, k, rel, src, cur, res)
+        return False
+
+    # ---- removing and replacing ---------------------------------------------------
+
+    def _remove(self, pair, k, rel, side, res) -> None:
+        self._report("recycle", rel, side)
+        where = self._discard(pair, side, rel)
         self.db.delete_subtree(pair.id, k)
         res.deleted += 1
-        self.log(pair.id, "info", f"Moved “{rel}” to the Recycle Bin ({_side_name(dst)})")
-        return bool(d[0])
+        self._log(pair, "info", f"Removed “{rel}” from {self._name(pair, side)} "
+                                f"(it's in {where})")
+
+    def _discard(self, pair, side, rel) -> str:
+        """Move an item out of the way: into old versions or the Recycle Bin."""
+        root = (pair.left, pair.right)[side]
+        if getattr(pair, "versions", False):
+            keep_version(root, rel)
+            return "old versions"
+        self.trash(os.path.join(root, rel), root)
+        return "the Recycle Bin"
+
+    def _log(self, pair, level, msg) -> None:
+        self.log(getattr(pair, "job", "") or pair.id, level, msg)
+
+    @staticmethod
+    def _name(pair, side) -> str:
+        names = getattr(pair, "names", None) or ("left", "right")
+        return names[side]
 
     def _has_new_content(self, k, side, scans, base) -> bool:
         prefix = k + os.sep
@@ -398,16 +485,32 @@ class Engine:
         s, d = cur[src], cur[dst]
         if s[0]:
             if d is not None and not d[0]:
-                self.trash(dst_path, roots[dst])
+                self._discard(pair, dst, rel)
             os.makedirs(dst_path, exist_ok=True)
         else:
             if d is not None and d[0]:
-                self.trash(dst_path, roots[dst])
+                self._discard(pair, dst, rel)
+                d = None
+            was = getattr(self, "_was", (None, None))
+            keep = None
+            if d is not None and getattr(pair, "versions", False):
+                keep = lambda: keep_version(roots[dst], rel)   # noqa: E731
+            elif (d is not None and was[dst] != d
+                  and getattr(pair, "mode", "two-way") != "two-way"):
+                # The copy here was edited since the last sync: don't just overwrite it.
+                def keep():
+                    where = self._discard(pair, dst, rel)
+                    self._log(pair, "warn", f"“{rel}” in {self._name(pair, dst)} had its own "
+                                            f"changes; they're in {where}")
             self._report("update" if d is not None or quiet else "copy", rel, dst)
-            _safe_copy(src_path, dst_path, s, self._add_bytes)
+            # the old file is moved aside only once the new one is fully written
+            _safe_copy(src_path, dst_path, s, self._add_bytes, before_replace=keep)
             res.copied += 0 if quiet else 1
             if not quiet:
-                self.log(pair.id, "info", f"Copied “{rel}” → {_side_name(dst)}")
+                verb = "Updated" if d is not None else "Copied"
+                versions = keep is not None and getattr(pair, "versions", False)
+                self._log(pair, "info", f"{verb} “{rel}” → {self._name(pair, dst)}"
+                                        + (" (old version kept)" if versions else ""))
         self._record(pair, k, rel)
 
     def _record(self, pair, k, rel) -> None:
@@ -426,8 +529,39 @@ class Engine:
                            shallow=False)
 
 
-def _side_name(i: int) -> str:
-    return "right" if i == 1 else "left"
+def keep_version(root: str, rel: str) -> str:
+    """Move `rel` into <root>/.syncmate-versions/, stamped with the time, keeping the
+    newest KEEP_VERSIONS versions of each file. Returns where it went."""
+    parent, name = os.path.split(rel)
+    stem, ext = os.path.splitext(name)
+    if os.path.isdir(os.path.join(root, rel)):
+        stem, ext = name, ""
+    vdir = os.path.join(root, VERSIONS_DIR, parent)
+    os.makedirs(vdir, exist_ok=True)
+    stamp = time.strftime("%Y-%m-%d %H%M%S")
+    prefix, suffix = f"{stem} [", f"]{ext}"
+    # several versions in the same second get a counter: always one past the highest,
+    # so a newer version can never take the name (and place) of a pruned older one
+    same = [f[len(prefix) + len(stamp):len(f) - len(suffix)].strip()
+            for f in os.listdir(vdir) if f.startswith(prefix + stamp) and f.endswith(suffix)]
+    n = max([int(x) for x in same if x.isdigit()] + [1 if "" in same else 0]) + 1
+    dest = os.path.join(vdir, f"{stem} [{stamp}{'' if n == 1 else f' {n}'}]{ext}")
+    os.replace(os.path.join(root, rel), dest)
+    # prune: keep only the newest versions of this item
+
+    def order(f):  # "2026-10-10 123805" or "2026-10-10 123805 2" -> sortable
+        parts = f[len(prefix):len(f) - len(suffix)].split(" ")
+        return (parts[0], parts[1] if len(parts) > 1 else "",
+                int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1)
+    olds = sorted((f for f in os.listdir(vdir) if f.startswith(prefix) and f.endswith(suffix)
+                   and len(f[len(prefix):len(f) - len(suffix)].split(" ")) in (2, 3)), key=order)
+    for f in olds[:-KEEP_VERSIONS]:
+        p = os.path.join(vdir, f)
+        try:
+            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+        except OSError:
+            pass
+    return dest
 
 
 def _actual_rel(root: str, rel: str) -> str | None:
@@ -458,7 +592,8 @@ def _copy_data(src: str, dst: str, on_bytes: Callable[[int], None]) -> None:
 
 
 def _safe_copy(src: str, dst: str, expected: tuple,
-               on_bytes: Callable[[int], None] = lambda n: None) -> None:
+               on_bytes: Callable[[int], None] = lambda n: None,
+               before_replace: Callable[[], object] | None = None) -> None:
     parent = os.path.dirname(dst)
     os.makedirs(parent, exist_ok=True)
     tmp = os.path.join(parent, f"{TEMP_PREFIX}{uuid.uuid4().hex[:8]}.tmp")
@@ -469,6 +604,8 @@ def _safe_copy(src: str, dst: str, expected: tuple,
             raise Busy(e.errno, e.strerror, src) from e
         if stat_path(src) != expected:
             raise Busy(0, "file is still changing", src)
+        if before_replace is not None and os.path.exists(dst):
+            before_replace()   # e.g. keep the old version
         try:
             os.replace(tmp, dst)
         except PermissionError:

@@ -1,4 +1,8 @@
-"""Watches folder pairs and runs the sync engine in a background thread.
+"""Watches sync jobs and runs the sync engine in a background thread.
+
+A job has one Main folder and one or more connected folders. Each connected folder is
+a "link" with Main and has its own sync type. Changes always pass through Main: an
+edit in one connected folder reaches Main, and from there the other folders.
 
 The UI only talks to `Controller`; every method returns immediately and the real
 work happens on the worker thread, so the window never freezes.
@@ -16,15 +20,17 @@ from dataclasses import dataclass, field
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from engine import (Engine, LooksEmpty, Progress, Result, RootMissing, default_trash,
-                    rel_is_ignored)
-from store import Config, Pair, StateDB, data_dir
+from engine import Engine, LooksEmpty, Progress, RootMissing, default_trash, rel_is_ignored
+from store import MODES, Config, Job, Member, StateDB, data_dir
 
 DEBOUNCE = 1.5          # seconds of quiet before syncing a burst of changes
 MAX_WAIT = 8.0          # ...but never wait longer than this
 FULL_SCAN_EVERY = 600   # safety-net rescan of everything (seconds)
 HEALTH_EVERY = 10       # check that folders still exist (seconds)
 RETRY_AFTER = 15        # retry files that were in use (seconds)
+MAX_PASSES = 3          # full scans repeat while changes are still flowing through Main
+
+MAIN = "main"           # marks events that came from a job's Main folder
 
 
 @dataclass
@@ -32,20 +38,22 @@ class Status:
     state: str = "starting"   # starting | syncing | synced | waiting | paused | error | empty
     message: str = ""
     last_sync: float = 0.0
-    empty_side: int = -1
+    empty_side: int = -1      # for "empty": which side of `empty_link` is empty
+    empty_link: str = ""
     progress: Progress | None = None   # set while files are being copied
+    progress_link: str = ""            # which connected folder the progress is for
 
 
 @dataclass
 class _Pending:
-    rels: set = field(default_factory=set)
-    moves: list = field(default_factory=list)
+    rels: dict = field(default_factory=dict)    # where (MAIN or member id) -> set of rels
+    moves: list = field(default_factory=list)   # (where, src, dst)
     full: bool = False
 
 
 class _Handler(FileSystemEventHandler):
-    def __init__(self, ctrl: "Controller", pid: str, side: int, root: str):
-        self.ctrl, self.pid, self.side, self.root = ctrl, pid, side, root
+    def __init__(self, ctrl: "Controller", jid: str, where: str, root: str):
+        self.ctrl, self.jid, self.where, self.root = ctrl, jid, where, root
 
     def _rel(self, path) -> str:
         if isinstance(path, bytes):
@@ -64,15 +72,15 @@ class _Handler(FileSystemEventHandler):
             dst = self._rel(event.dest_path)
             s_ok, d_ok = not rel_is_ignored(src), not rel_is_ignored(dst)
             if s_ok and d_ok and src and dst:
-                self.ctrl._push(self.pid, move=(self.side, src, dst))
+                self.ctrl._push(self.jid, self.where, move=(src, dst))
             else:
                 if s_ok:
-                    self.ctrl._push(self.pid, rel=src)
+                    self.ctrl._push(self.jid, self.where, rel=src)
                 if d_ok:
-                    self.ctrl._push(self.pid, rel=dst)
+                    self.ctrl._push(self.jid, self.where, rel=dst)
             return
         if not rel_is_ignored(src):
-            self.ctrl._push(self.pid, rel=src)
+            self.ctrl._push(self.jid, self.where, rel=src)
 
 
 def _setup_file_log() -> logging.Logger:
@@ -109,7 +117,7 @@ class Controller:
         self.debounce = debounce
         self.full_scan_every = full_scan_every
         self.save_config = save_config
-        self.activity: deque = deque(maxlen=300)
+        self.activity: deque = deque(maxlen=500)
         self._file_log = _setup_file_log()
         self.engine = Engine(self.db, self._log, trash)
 
@@ -118,7 +126,7 @@ class Controller:
         self._pending: dict[str, _Pending] = {}
         self._first_event = self._last_event = 0.0
         self._commands: list = []
-        self._retry: list = []  # (due, pid, rel)
+        self._retry: list = []  # (due, jid, where, rel)
         self.status: dict[str, Status] = {}
         self._watches: dict[str, list] = {}
         self._last_full: dict[str, float] = {}
@@ -130,10 +138,10 @@ class Controller:
 
     def start(self) -> None:
         self._observer.start()
-        for p in self.config.pairs:
-            self.status[p.id] = Status(state="paused" if p.paused else "starting")
-            if not p.paused:
-                self._command("resume", p.id)
+        for j in self.config.jobs:
+            self.status[j.id] = Status(state="paused" if j.paused else "starting")
+            if not j.paused:
+                self._command("resume", j.id)
         self._thread.start()
 
     def stop(self) -> None:
@@ -148,9 +156,9 @@ class Controller:
             pass
         self.db.close()
 
-    def pairs(self) -> list[Pair]:
+    def jobs(self) -> list[Job]:
         with self._lock:
-            return [Pair(**vars(p)) for p in self.config.pairs]
+            return [j.copy() for j in self.config.jobs]
 
     def snapshot(self) -> dict[str, Status]:
         with self._lock:
@@ -160,6 +168,17 @@ class Controller:
                 if v.progress is not None:
                     st.progress = Progress(**vars(v.progress))
                 out[k] = st
+            return out
+
+    def recent_activity(self, jid: str, n: int = 6) -> list:
+        """The newest `n` activity entries for one job: (time, level, message)."""
+        with self._lock:
+            out = []
+            for t, j, level, msg in self.activity:
+                if j == jid:
+                    out.append((t, level, msg))
+                    if len(out) >= n:
+                        break
             return out
 
     def overall(self) -> str:
@@ -173,48 +192,57 @@ class Controller:
             return "paused"
         return "synced"
 
-    def validate(self, left: str, right: str, ignore: str | None = None) -> str | None:
-        """An error message, or None if the pair is OK to add (or to change, for `ignore`)."""
-        if not left or not right:
-            return "Choose both folders."
-        for p in (left, right):
+    def validate(self, main: str, members: list, ignore: str | None = None) -> str | None:
+        """An error message, or None if the folders are OK for a job.
+        `members` is a list of connected-folder paths; `ignore` is the job being edited."""
+        if not main:
+            return "Choose the Main folder."
+        members = [m for m in members if m]
+        if not members:
+            return "Add at least one folder to sync with Main."
+        folders = [main] + members
+        for p in folders:
             if not os.path.isdir(p):
                 return f"“{p}” is not a folder."
-        if _overlaps(left, right):
-            return "The folders can't be the same or inside each other."
-        for pair in self.pairs():
-            if pair.id == ignore:
+        for i, a in enumerate(folders):
+            for b in folders[i + 1:]:
+                if _overlaps(a, b):
+                    return (f"“{a}” and “{b}” are the same folder or inside each other.")
+        for job in self.jobs():
+            if job.id == ignore:
                 continue
-            for new in (left, right):
-                for old in (pair.left, pair.right):
+            for new in folders:
+                for old in [job.main] + [m.path for m in job.members]:
                     if _overlaps(new, old):
                         return f"“{new}” overlaps a folder that's already being synced."
         return None
 
-    def add_pair(self, left: str, right: str) -> Pair:
-        pair = Pair(left=os.path.abspath(left), right=os.path.abspath(right))
+    def add_job(self, main: str, members: list) -> Job:
+        """members: list of Member (or (path, mode, versions) tuples)."""
+        job = Job(main=os.path.abspath(main), members=[_member(m) for m in members])
         with self._lock:
-            self.config.pairs.append(pair)
-            self.status[pair.id] = Status()
+            self.config.jobs.append(job)
+            self.status[job.id] = Status()
             self._save()
-        self._log(pair.id, "info", f"Started syncing {pair.left} ⇄ {pair.right}")
-        self._command("resume", pair.id)
-        return pair
+        self._log(job.id, "info", f"Started syncing {job.main} with "
+                                  f"{len(job.members)} folder{'s' if len(job.members) > 1 else ''}")
+        self._command("resume", job.id)
+        return job
 
-    def update_pair(self, pid: str, left: str, right: str) -> None:
-        """Point an existing pair at different folders (they're merged afresh)."""
-        self._command("edit", pid, os.path.abspath(left), os.path.abspath(right))
+    def update_job(self, jid: str, main: str, members: list) -> None:
+        """Change a job's Main folder and/or its connected folders, types and options."""
+        self._command("edit", jid, os.path.abspath(main), [_member(m) for m in members])
 
-    def remove_pair(self, pid: str) -> None:
-        self._command("remove", pid)
+    def remove_job(self, jid: str) -> None:
+        self._command("remove", jid)
 
-    def set_paused(self, pid: str, paused: bool) -> None:
-        self._command("pause" if paused else "resume", pid)
+    def set_paused(self, jid: str, paused: bool) -> None:
+        self._command("pause" if paused else "resume", jid)
 
-    def sync_now(self, pid: str | None = None) -> None:
-        for p in self.pairs():
-            if pid in (None, p.id) and not p.paused:
-                self._push(p.id, full=True, now=True)
+    def sync_now(self, jid: str | None = None) -> None:
+        for j in self.jobs():
+            if jid in (None, j.id) and not j.paused:
+                self._push(j.id, MAIN, full=True, now=True)
 
     def remember(self, **settings) -> None:
         """Save small app settings (e.g. tray_hint_shown=True)."""
@@ -223,10 +251,10 @@ class Controller:
                 setattr(self.config, k, v)
             self._save()
 
-    def resolve_empty(self, pid: str, apply_deletion: bool) -> None:
+    def resolve_empty(self, jid: str, apply_deletion: bool) -> None:
         """A folder suddenly became empty. Either delete on the other side too,
         or restore its files from the other side."""
-        self._command("resolve", pid, apply_deletion)
+        self._command("resolve", jid, apply_deletion)
 
     # ================================================================== internals
 
@@ -234,35 +262,37 @@ class Controller:
         if self.save_config:
             self.config.save()
 
-    def _log(self, pid: str, level: str, msg: str) -> None:
+    def _log(self, jid: str, level: str, msg: str) -> None:
         with self._lock:
-            self.activity.appendleft((time.time(), pid, level, msg))
+            self.activity.appendleft((time.time(), jid, level, msg))
         getattr(self._file_log, {"warn": "warning"}.get(level, level), self._file_log.info)(msg)
 
-    def _set(self, pid: str, **kw) -> None:
+    def _set(self, jid: str, **kw) -> None:
         with self._lock:
-            st = self.status.setdefault(pid, Status())
+            st = self.status.setdefault(jid, Status())
             for k, v in kw.items():
                 setattr(st, k, v)
 
-    def _pair(self, pid: str) -> Pair | None:
+    def _job(self, jid: str) -> Job | None:
         with self._lock:
-            return next((p for p in self.config.pairs if p.id == pid), None)
+            j = next((j for j in self.config.jobs if j.id == jid), None)
+            return j.copy() if j else None
 
     def _command(self, *cmd) -> None:
         with self._lock:
             self._commands.append(cmd)
         self._wake.set()
 
-    def _push(self, pid: str, rel: str | None = None, move=None, full=False, now=False):
+    def _push(self, jid: str, where: str, rel: str | None = None, move=None,
+              full=False, now=False):
         with self._lock:
-            p = self._pending.setdefault(pid, _Pending())
+            p = self._pending.setdefault(jid, _Pending())
             if full or rel == "":
                 p.full = True
             elif rel is not None:
-                p.rels.add(rel)
+                p.rels.setdefault(where, set()).add(rel)
             if move:
-                p.moves.append(move)
+                p.moves.append((where,) + tuple(move))
             t = time.monotonic()
             if not self._first_event:
                 self._first_event = t
@@ -271,16 +301,17 @@ class Controller:
 
     # --- watching
 
-    def _watch(self, pair: Pair) -> None:
-        self._unwatch(pair.id)
-        watches = []
-        for side, root in enumerate((pair.left, pair.right)):
-            watches.append(self._observer.schedule(
-                _Handler(self, pair.id, side, root), root, recursive=True))
-        self._watches[pair.id] = watches
+    def _watch(self, job: Job) -> None:
+        self._unwatch(job.id)
+        watches = [self._observer.schedule(_Handler(self, job.id, MAIN, job.main),
+                                           job.main, recursive=True)]
+        for m in job.members:
+            watches.append(self._observer.schedule(_Handler(self, job.id, m.id, m.path),
+                                                   m.path, recursive=True))
+        self._watches[job.id] = watches
 
-    def _unwatch(self, pid: str) -> None:
-        for w in self._watches.pop(pid, []):
+    def _unwatch(self, jid: str) -> None:
+        for w in self._watches.pop(jid, []):
             try:
                 self._observer.unschedule(w)
             except Exception:
@@ -302,12 +333,12 @@ class Controller:
                     last_health = now
                     self._health_check()
                 self._due_retries(now)
-                for p in self.pairs():
-                    if not p.paused and now - self._last_full.get(p.id, now) >= self.full_scan_every:
-                        self._push(p.id, full=True, now=True)
+                for j in self.jobs():
+                    if not j.paused and now - self._last_full.get(j.id, now) >= self.full_scan_every:
+                        self._push(j.id, MAIN, full=True, now=True)
                 batch = self._take_batch(now)
-                for pid, pend in batch.items():
-                    self._process(pid, pend)
+                for jid, pend in batch.items():
+                    self._process(jid, pend)
             except Exception as e:  # never let the worker die
                 self._file_log.exception("worker error")
                 self._log("", "error", f"Unexpected error: {e}")
@@ -328,147 +359,205 @@ class Controller:
     def _run_commands(self) -> None:
         with self._lock:
             cmds, self._commands = self._commands, []
-        for cmd, pid, *args in cmds:
-            pair = self._pair(pid)
-            if pair is None:
+        for cmd, jid, *args in cmds:
+            job = self._job(jid)
+            if job is None:
                 continue
             if cmd == "remove":
-                self._unwatch(pid)
+                self._unwatch(jid)
                 with self._lock:
-                    self.config.pairs = [p for p in self.config.pairs if p.id != pid]
-                    self.status.pop(pid, None)
-                    self._pending.pop(pid, None)
+                    self.config.jobs = [j for j in self.config.jobs if j.id != jid]
+                    self.status.pop(jid, None)
+                    self._pending.pop(jid, None)
                     self._save()
-                self.db.delete_subtree(pid, "")
+                for m in job.members:
+                    self.db.delete_subtree(m.id, "")
                 self.db.commit()
-                self._log(pid, "info", f"Stopped syncing {pair.left} ⇄ {pair.right}")
+                self._log(jid, "info", f"Stopped syncing {job.main}")
             elif cmd == "pause":
-                self._unwatch(pid)
+                self._unwatch(jid)
+                self._edit_config(jid, paused=True)
                 with self._lock:
-                    self._pair(pid).paused = True
-                    self._pending.pop(pid, None)
-                    self._save()
-                self._set(pid, state="paused", message="")
+                    self._pending.pop(jid, None)
+                self._set(jid, state="paused", message="", progress=None)
+                self._log(jid, "info", "Paused")
             elif cmd == "resume":
-                with self._lock:
-                    self._pair(pid).paused = False
-                    self._save()
-                self._set(pid, state="starting", message="")
-                self._start_pair(pair)
+                was_paused = job.paused
+                self._edit_config(jid, paused=False)
+                self._set(jid, state="starting", message="")
+                if was_paused:
+                    self._log(jid, "info", "Resumed")
+                self._start_job(self._job(jid))
             elif cmd == "edit":
-                left, right = args
-                self._unwatch(pid)
-                with self._lock:
-                    p = self._pair(pid)
-                    p.left, p.right = left, right
-                    self._pending.pop(pid, None)
-                    self._save()
-                self.db.delete_subtree(pid, "")  # old history doesn't apply to new folders
-                self.db.commit()
-                self._log(pid, "info", f"Changed to {left} ⇄ {right}")
-                if not p.paused:
-                    self._set(pid, state="starting", message="")
-                    self._start_pair(Pair(**vars(p)))
+                main, members = args
+                self._apply_edit(job, main, members)
             elif cmd == "resolve":
                 apply_deletion = args[0]
-                self._set(pid, state="syncing", message="", empty_side=-1)
-                if not apply_deletion:
-                    self.db.delete_subtree(pid, "")  # forget history -> plain merge
+                st = self.snapshot().get(jid)
+                link_id = st.empty_link if st else ""
+                self._set(jid, state="syncing", message="", empty_side=-1, empty_link="")
+                if not apply_deletion and link_id:
+                    self.db.delete_subtree(link_id, "")  # forget history -> plain merge
                     self.db.commit()
-                self._start_pair(pair, allow_empty=apply_deletion)
+                self._start_job(job, allow_empty_link=link_id if apply_deletion else "")
 
-    def _start_pair(self, pair: Pair, allow_empty: bool = False) -> None:
-        for side, root in enumerate((pair.left, pair.right)):
+    def _edit_config(self, jid: str, **kw) -> None:
+        with self._lock:
+            j = next((j for j in self.config.jobs if j.id == jid), None)
+            if j is not None:
+                for k, v in kw.items():
+                    setattr(j, k, v)
+                self._save()
+
+    def _apply_edit(self, old: Job, main: str, members: list) -> None:
+        """Save a changed job. Sync history is kept for links whose two folders didn't
+        change, so only what's actually new gets compared and copied."""
+        self._unwatch(old.id)
+        main_changed = _norm(main) != _norm(old.main)
+        old_paths = {m.id: m.path for m in old.members}
+        new_ids = {m.id for m in members}
+        for m in old.members:
+            if m.id not in new_ids:
+                self.db.delete_subtree(m.id, "")
+        for m in members:
+            if main_changed or m.id not in old_paths or _norm(old_paths[m.id]) != _norm(m.path):
+                self.db.delete_subtree(m.id, "")
+        self.db.commit()
+        with self._lock:
+            j = next((j for j in self.config.jobs if j.id == old.id), None)
+            if j is None:
+                return
+            j.main, j.members = main, members
+            self._pending.pop(old.id, None)
+            self._save()
+        self._log(old.id, "info", f"Settings changed: Main {main}, "
+                                  f"{len(members)} connected folder{'s' if len(members) != 1 else ''}")
+        job = self._job(old.id)
+        if not job.paused:
+            self._set(job.id, state="starting", message="")
+            self._start_job(job)
+
+    def _start_job(self, job: Job, allow_empty_link: str = "") -> None:
+        for root in [job.main] + [m.path for m in job.members]:
             if not os.path.isdir(root):
-                self._unwatch(pair.id)
-                self._set(pair.id, state="error", message=f"Folder not found: {root}")
+                self._unwatch(job.id)
+                self._set(job.id, state="error", message=f"Folder not found: {root}")
                 return
         try:
-            self._watch(pair)
+            self._watch(job)
         except Exception as e:
-            self._set(pair.id, state="error", message=f"Can't watch folder: {e}")
+            self._set(job.id, state="error", message=f"Can't watch folder: {e}")
             return
-        self._process(pair.id, _Pending(full=True), allow_empty=allow_empty)
+        self._process(job.id, _Pending(full=True), allow_empty_link=allow_empty_link)
 
     def _health_check(self) -> None:
-        for p in self.pairs():
-            if p.paused:
+        for j in self.jobs():
+            if j.paused:
                 continue
-            st = self.snapshot().get(p.id)
-            ok = os.path.isdir(p.left) and os.path.isdir(p.right)
-            if not ok and p.id in self._watches:
-                self._unwatch(p.id)
-                missing = p.left if not os.path.isdir(p.left) else p.right
-                self._set(p.id, state="error", message=f"Folder not found: {missing}")
-            elif ok and st and st.state == "error" and st.message.startswith("Folder not found"):
-                self._log(p.id, "info", "Folder is back — resuming")
-                self._start_pair(p)
+            st = self.snapshot().get(j.id)
+            missing = next((p for p in [j.main] + [m.path for m in j.members]
+                            if not os.path.isdir(p)), None)
+            if missing and j.id in self._watches:
+                self._unwatch(j.id)
+                self._set(j.id, state="error", message=f"Folder not found: {missing}")
+            elif not missing and st and st.state == "error" and st.message.startswith("Folder not found"):
+                self._log(j.id, "info", "Folder is back — resuming")
+                self._start_job(j)
 
     def _due_retries(self, now: float) -> None:
         with self._lock:
             due = [r for r in self._retry if r[0] <= now]
             self._retry = [r for r in self._retry if r[0] > now]
-        for _, pid, rel in due:
-            self._push(pid, rel=rel, now=True)
+        for _, jid, where, rel in due:
+            self._push(jid, where, rel=rel, now=True)
 
-    def _process(self, pid: str, pend: _Pending, allow_empty: bool = False) -> None:
-        pair = self._pair(pid)
-        if pair is None or pair.paused:
+    def _process(self, jid: str, pend: _Pending, allow_empty_link: str = "") -> None:
+        job = self._job(jid)
+        if job is None or job.paused:
             return
-        self._set(pid, state="syncing", message="", progress=None)
-        total = Result()
+        links = job.links()
+        self._set(jid, state="syncing", message="", progress=None)
+        failed: list = []   # (where, rel)
 
-        def on_progress(p: Progress):
-            with self._lock:
-                st = self.status.get(pid)
-                if st is not None:
-                    st.progress = p
+        def reconcile(link, rel=""):
+            def on_progress(p: Progress, lid=link.id):
+                with self._lock:
+                    st = self.status.get(jid)
+                    if st is not None:
+                        st.progress, st.progress_link = p, lid
+            r = self.engine.reconcile(link, rel, allow_empty=(link.id == allow_empty_link),
+                                      progress=on_progress)
+            failed.extend((link.id, x) for x in r.failed)
+            return r
 
+        current = None
         try:
             if pend.full:
-                total = self.engine.reconcile(pair, "", allow_empty=allow_empty,
-                                              progress=on_progress)
-                self._last_full[pid] = time.monotonic()
+                # Repeat while changes are still flowing through Main to the other folders.
+                for _ in range(MAX_PASSES if len(links) > 1 else 1):
+                    changes = 0
+                    for link in links:
+                        current = link
+                        changes += reconcile(link).changes
+                    if not changes:
+                        break
+                self._last_full[jid] = time.monotonic()
             else:
-                rels = set(pend.rels)
-                for side, src, dst in pend.moves:
-                    try:
-                        self.engine.mirror_move(pair, side, src, dst)
-                    except OSError as e:
-                        self._log(pid, "warn", f"Couldn't rename “{src}”: {e.strerror or e}")
-                    rels.update((src, dst))
-                for rel in _collapse(rels):
-                    r = self.engine.reconcile(pair, rel, progress=on_progress)
-                    total.copied += r.copied
-                    total.deleted += r.deleted
-                    total.replaced += r.replaced
-                    total.failed += r.failed
+                by_id = {link.id: link for link in links}
+                rels = {w: set(s) for w, s in pend.rels.items()}
+                for where, src, dst in pend.moves:
+                    targets = links if where == MAIN else [by_id[where]] if where in by_id else []
+                    for link in targets:
+                        current = link
+                        try:
+                            self.engine.mirror_move(link, 0 if where == MAIN else 1, src, dst)
+                        except OSError as e:
+                            self._log(jid, "warn", f"Couldn't rename “{src}”: {e.strerror or e}")
+                    rels.setdefault(where, set()).update((src, dst))
+                for where, rs in rels.items():
+                    targets = links if where == MAIN else [by_id[where]] if where in by_id else []
+                    for link in targets:
+                        current = link
+                        for rel in _collapse(rs):
+                            reconcile(link, rel)
         except RootMissing as e:
-            self._unwatch(pid)
-            self._set(pid, progress=None, state="error", message=str(e))
-            self._log(pid, "error", str(e))
+            self._unwatch(jid)
+            self._set(jid, progress=None, state="error", message=str(e))
+            self._log(jid, "error", str(e))
             return
         except LooksEmpty as e:
-            self._set(pid, progress=None, state="empty", empty_side=e.side,
+            self._set(jid, progress=None, state="empty", empty_side=e.side,
+                      empty_link=current.id if current else "",
                       message=f"{e.path} is suddenly empty — paused to protect your files")
-            self._log(pid, "warn", f"{e.path} is suddenly empty; waiting for you to decide")
+            self._log(jid, "warn", f"{e.path} is suddenly empty; waiting for you to decide")
             return
         except OSError as e:
-            self._set(pid, progress=None, state="error", message=f"Couldn't read folder: {e.strerror or e}")
-            self._log(pid, "error", f"Couldn't read folder: {e}")
+            self._set(jid, progress=None, state="error",
+                      message=f"Couldn't read folder: {e.strerror or e}")
+            self._log(jid, "error", f"Couldn't read folder: {e}")
             with self._lock:
-                self._retry.append((time.monotonic() + RETRY_AFTER, pid, ""))
+                self._retry.append((time.monotonic() + RETRY_AFTER, jid, MAIN, ""))
             return
 
-        if total.failed:
+        if failed:
             with self._lock:
                 due = time.monotonic() + RETRY_AFTER
-                self._retry += [(due, pid, rel) for rel in set(total.failed)]
-            n = len(set(total.failed))
-            self._set(pid, state="waiting", last_sync=time.time(), progress=None,
+                # a failed item is retried from Main, which re-checks every folder
+                self._retry += [(due, jid, MAIN, rel) for rel in {r for _, r in failed}]
+            n = len({r for _, r in failed})
+            self._set(jid, state="waiting", last_sync=time.time(), progress=None,
                       message=f"{n} file{'s' if n > 1 else ''} in use — will retry")
         else:
-            self._set(pid, state="synced", message="", last_sync=time.time(), progress=None)
+            self._set(jid, state="synced", message="", last_sync=time.time(), progress=None)
+
+
+def _member(m) -> Member:
+    if isinstance(m, Member):
+        return Member(path=os.path.abspath(m.path), mode=m.mode if m.mode in MODES else "two-way",
+                      versions=bool(m.versions), id=m.id)
+    path, mode, versions = (tuple(m) + ("two-way", False))[:3]
+    return Member(path=os.path.abspath(path), mode=mode if mode in MODES else "two-way",
+                  versions=bool(versions))
 
 
 def _collapse(rels: set) -> list:

@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 2.0 - Multi-folder syncs and sync types
+
+Jobs with a Main folder and any number of connected folders; per-folder sync type (Two-way, Mirror, Update, Collect) and old-files setting (Recycle Bin or keep the last 10 versions); recent activity in each sync.
+
 ## 1.4 - Live progress, expandable syncs
 
 Live progress (file, items, MB, progress bar) and 'synced at time, day'; folder syncs expand in place to edit (⋮ or click anywhere); 'Add folder sync' opens a blank expanded card.

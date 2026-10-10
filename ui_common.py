@@ -63,8 +63,16 @@ def synced_at(t: float) -> str:
 _VERB = {"copy": "Copying", "update": "Updating", "rename": "Renaming"}
 
 
-def describe(st, pair) -> str:
-    """The main status line for a folder pair."""
+def _dest_name(st, job) -> str:
+    p = st.progress
+    if p.to_side == 0:
+        return "Main"
+    m = next((m for m in job.members if m.id == st.progress_link), None)
+    return folder_name(m.path) if m else "folder"
+
+
+def describe(st, job) -> str:
+    """The main status line for a sync job."""
     if st.state == "synced":
         return f"In sync · synced {synced_at(st.last_sync)}" if st.last_sync else "In sync"
     if st.state in ("syncing", "starting"):
@@ -73,9 +81,9 @@ def describe(st, pair) -> str:
             return "Checking for changes…"
         if not p.rel:
             return "Finishing up…"
-        dest = folder_name(pair.right if p.to_side == 1 else pair.left)
+        dest = _dest_name(st, job)
         if p.action == "recycle":
-            return f"Moving {elide(p.rel, 44)} to the Recycle Bin (in {dest})"
+            return f"Removing {elide(p.rel, 44)} from {dest}"
         return f"{_VERB.get(p.action, 'Syncing')} {elide(p.rel, 44)} → {dest}"
     if st.state == "paused":
         return "Paused"

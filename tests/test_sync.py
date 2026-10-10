@@ -247,8 +247,11 @@ def test_many_files(env):
 def wait_for(cond, timeout=10):
     end = time.time() + timeout
     while time.time() < end:
-        if cond():
-            return True
+        try:
+            if cond():
+                return True
+        except OSError:
+            pass
         time.sleep(0.1)
     return False
 
@@ -263,7 +266,7 @@ def live(tmp_path, monkeypatch):
     ctrl = Controller(config=Config(), db=StateDB(str(tmp_path / "s.db")), trash=bin_,
                       debounce=0.3, save_config=False)
     ctrl.start()
-    ctrl.add_pair(str(L), str(R))
+    ctrl.add_job(str(L), [(str(R), "two-way", False)])
     assert wait_for(lambda: ctrl.overall() == "synced")
     yield ctrl, str(L), str(R), bin_
     ctrl.stop()
@@ -294,7 +297,7 @@ def test_live_create_edit_rename_delete(live):
 
 def test_live_pause_resume_catches_up(live):
     ctrl, L, R, _ = live
-    pid = ctrl.pairs()[0].id
+    pid = ctrl.jobs()[0].id
     ctrl.set_paused(pid, True)
     assert wait_for(lambda: ctrl.overall() == "paused")
     write(f"{L}/while-paused.txt", "p")
@@ -306,11 +309,11 @@ def test_live_pause_resume_catches_up(live):
 
 def test_validation(live):
     ctrl, L, R, _ = live
-    assert ctrl.validate(L, L)
-    assert ctrl.validate(L, os.path.join(L))
+    assert ctrl.validate(L, [L])
+    assert ctrl.validate(L, [])                       # needs at least one folder
     os.makedirs(f"{L}/inner")
-    assert ctrl.validate(f"{L}/inner", R)          # overlaps existing pair
-    assert ctrl.validate("/nope", R)
+    assert ctrl.validate(f"{L}/inner", [R])         # overlaps an existing job
+    assert ctrl.validate("/nope", [R])
 
 
 def test_live_office_style_save(live):
@@ -343,8 +346,8 @@ def test_changes_while_app_closed(tmp_path, monkeypatch):
         c.start()
         return c
     c = run()
-    if not cfg.pairs:
-        c.add_pair(L, R)
+    if not cfg.jobs:
+        c.add_job(L, [(R, "two-way", False)])
     assert wait_for(lambda: os.path.exists(f"{R}/gone.txt") and c.overall() == "synced")
     c.stop()
 
@@ -396,3 +399,176 @@ def test_copy_keeps_modified_time(env):
     write(f"{env.L}/a.txt", "A", mtime=1_000_000)
     env.sync()
     assert int(os.stat(f"{env.R}/a.txt").st_mtime) == 1_000_000
+
+
+# ------------------------------------------------------------------ sync types & versions
+
+def link(env, mode="two-way", versions=False):
+    return Pair(left=env.L, right=env.R, id=f"{mode}-{versions}", mode=mode, versions=versions,
+                names=("Main", "Copy"))
+
+
+def test_mirror_makes_an_exact_copy(env):
+    p = link(env, "mirror")
+    write(f"{env.L}/a.txt", "main A", mtime=1_000_500)
+    write(f"{env.L}/sub/b.txt", "main B")
+    write(f"{env.R}/a.txt", "old copy", mtime=1_000_000)
+    write(f"{env.R}/extra.txt", "not in main")
+    env.eng.reconcile(p)
+    assert tree(env.R) == tree(env.L) == {"a.txt": "main A", "sub/": None, "sub/b.txt": "main B"}
+    assert sorted(env.bin.names()) == ["a.txt", "extra.txt"]   # replaced / removed -> bin
+    write(f"{env.R}/a.txt", "edited in the copy", mtime=1_000_900)
+    env.eng.reconcile(p)
+    assert read(f"{env.R}/a.txt") == "main A"                   # copy edits are undone
+    assert read(f"{env.L}/a.txt") == "main A"                   # and never reach Main
+    shutil.rmtree(f"{env.L}/sub")
+    env.eng.reconcile(p)
+    assert tree(env.R) == {"a.txt": "main A"}                   # deletions are mirrored
+
+
+def test_update_copies_but_never_deletes(env):
+    p = link(env, "update")
+    write(f"{env.L}/a.txt", "v1", mtime=1_000_000)
+    write(f"{env.R}/mine.txt", "only in the copy")
+    env.eng.reconcile(p)
+    assert tree(env.R) == {"a.txt": "v1", "mine.txt": "only in the copy"}
+    assert tree(env.L) == {"a.txt": "v1"}                       # nothing flows back
+    write(f"{env.L}/a.txt", "v2", mtime=1_000_100)
+    env.eng.reconcile(p)
+    assert read(f"{env.R}/a.txt") == "v2"                       # updates are copied
+    os.remove(f"{env.L}/a.txt")
+    env.eng.reconcile(p)
+    assert read(f"{env.R}/a.txt") == "v2" and env.bin.items == []   # never deleted
+
+
+def test_collect_is_update_in_reverse(env):
+    p = link(env, "collect")
+    write(f"{env.R}/photo.jpg", "pic")
+    write(f"{env.L}/keep.txt", "main only")
+    env.eng.reconcile(p)
+    assert tree(env.L) == {"keep.txt": "main only", "photo.jpg": "pic"}
+    assert tree(env.R) == {"photo.jpg": "pic"}
+    os.remove(f"{env.R}/photo.jpg")
+    env.eng.reconcile(p)
+    assert read(f"{env.L}/photo.jpg") == "pic"                  # Main keeps it
+
+
+def test_versions_are_kept_instead_of_recycled(env):
+    import engine
+    p = link(env, "two-way", versions=True)
+    write(f"{env.L}/report.docx", "v1", mtime=1_000_000)
+    env.eng.reconcile(p)
+    write(f"{env.L}/report.docx", "v2", mtime=1_000_100)
+    env.eng.reconcile(p)
+    vdir = os.path.join(env.R, engine.VERSIONS_DIR)
+    vs = os.listdir(vdir)
+    assert len(vs) == 1 and vs[0].startswith("report [") and vs[0].endswith("].docx")
+    assert read(os.path.join(vdir, vs[0])) == "v1"              # the old content is kept
+    os.remove(f"{env.L}/report.docx")
+    env.eng.reconcile(p)
+    assert not os.path.exists(f"{env.R}/report.docx")
+    assert sorted(read(os.path.join(vdir, f)) for f in os.listdir(vdir)) == ["v1", "v2"]
+    assert env.bin.items == []                                  # nothing went to the bin
+    assert engine.VERSIONS_DIR not in os.listdir(env.L)         # versions never sync back
+
+
+def test_versions_keep_only_the_newest_ten(env):
+    import engine
+    p = link(env, "update", versions=True)
+    for i in range(14):
+        write(f"{env.L}/a.txt", f"v{i}", mtime=1_000_000 + i * 10)
+        env.eng.reconcile(p)
+    vdir = os.path.join(env.R, engine.VERSIONS_DIR)
+    kept = sorted(read(os.path.join(vdir, f)) for f in os.listdir(vdir))
+    assert len(kept) == engine.KEEP_VERSIONS
+    assert "v0" not in kept and "v12" in kept and read(f"{env.R}/a.txt") == "v13"
+
+
+def test_mirror_guards_against_an_emptied_main(env):
+    p = link(env, "mirror")
+    for i in range(25):
+        write(f"{env.L}/{i}.txt", str(i))
+    env.eng.reconcile(p)
+    for f in os.listdir(env.L):
+        os.remove(os.path.join(env.L, f))
+    with pytest.raises(LooksEmpty):
+        env.eng.reconcile(p)
+    assert len(os.listdir(env.R)) == 25
+
+
+def test_renames_are_not_mirrored_in_update_mode(env):
+    p = link(env, "update")
+    write(f"{env.L}/old.txt", "x")
+    env.eng.reconcile(p)
+    os.rename(f"{env.L}/old.txt", f"{env.L}/new.txt")
+    assert not env.eng.mirror_move(p, 0, "old.txt", "new.txt")
+    env.eng.reconcile(p)
+    assert tree(env.R) == {"old.txt": "x", "new.txt": "x"}      # nothing deleted
+
+
+def test_old_pairs_migrate_to_jobs(tmp_path):
+    import json
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"pairs": [{"left": "A", "right": "B", "paused": True, "id": "p1"}]}))
+    c = Config.load(str(cfg))
+    j = c.jobs[0]
+    assert (j.main, j.paused, j.id) == ("A", True, "p1")
+    assert [(m.path, m.mode, m.id) for m in j.members] == [("B", "two-way", "p1")]  # history kept
+
+
+# ------------------------------------------------------------------ jobs with several folders
+
+@pytest.fixture
+def job(tmp_path, monkeypatch):
+    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
+    paths = {n: str(tmp_path / n) for n in ("Main", "Two", "Mirror", "Backup")}
+    for p in paths.values():
+        os.makedirs(p)
+    bin_ = Bin(str(tmp_path / "bin"))
+    os.makedirs(bin_.path)
+    ctrl = Controller(config=Config(), db=StateDB(str(tmp_path / "s.db")), trash=bin_,
+                      debounce=0.3, save_config=False)
+    ctrl.start()
+    ctrl.add_job(paths["Main"], [(paths["Two"], "two-way", False),
+                                 (paths["Mirror"], "mirror", False),
+                                 (paths["Backup"], "update", False)])
+    assert wait_for(lambda: ctrl.overall() == "synced")
+    yield ctrl, paths, bin_
+    ctrl.stop()
+
+
+def test_live_changes_flow_through_main(job):
+    ctrl, P, bin_ = job
+    write(f"{P['Two']}/notes.txt", "from Two")                  # edit in a connected folder
+    for n in ("Main", "Mirror", "Backup"):
+        assert wait_for(lambda n=n: os.path.exists(f"{P[n]}/notes.txt")), n
+    write(f"{P['Mirror']}/notes.txt", "edited in the mirror")   # a mirror can't change Main
+    assert wait_for(lambda: read(f"{P['Mirror']}/notes.txt") == "from Two")
+    assert read(f"{P['Main']}/notes.txt") == "from Two"
+    os.remove(f"{P['Main']}/notes.txt")                         # delete in Main
+    assert wait_for(lambda: not os.path.exists(f"{P['Two']}/notes.txt")
+                    and not os.path.exists(f"{P['Mirror']}/notes.txt"))
+    time.sleep(1)
+    assert read(f"{P['Backup']}/notes.txt") == "from Two"       # the backup keeps it
+    acts = ctrl.recent_activity(ctrl.jobs()[0].id, n=50)
+    assert any("notes.txt" in m for _, _, m in acts)
+
+
+def test_live_edit_job_add_and_remove_folders(job, tmp_path):
+    ctrl, P, bin_ = job
+    write(f"{P['Main']}/a.txt", "A")
+    assert wait_for(lambda: os.path.exists(f"{P['Two']}/a.txt"))
+    j = ctrl.jobs()[0]
+    extra = str(tmp_path / "Extra")
+    os.makedirs(extra)
+    members = [m for m in j.members if m.path != P["Mirror"]]   # drop the mirror
+    from store import Member
+    members.append(Member(path=extra, mode="two-way"))
+    ctrl.update_job(j.id, j.main, members)
+    assert wait_for(lambda: os.path.exists(f"{extra}/a.txt"))  # new folder gets the files
+    write(f"{P['Mirror']}/after.txt", "no longer synced")
+    write(f"{extra}/b.txt", "B")
+    assert wait_for(lambda: os.path.exists(f"{P['Two']}/b.txt"))
+    time.sleep(1)
+    assert not os.path.exists(f"{P['Main']}/after.txt")         # removed folder is ignored
+    assert bin_.items == []                                     # nothing re-merged or binned

@@ -23,17 +23,68 @@ def data_dir() -> str:
 
 # --------------------------------------------------------------------------- config
 
+MODES = ("two-way", "mirror", "update", "collect")
+MODE_LABELS = {
+    "two-way": "Two-way  (Main ⇄ folder)",
+    "mirror": "Mirror  (Main → folder, exact copy)",
+    "update": "Update  (Main → folder, add & update only)",
+    "collect": "Collect  (folder → Main, add & update only)",
+}
+VERSION_LABELS = {False: "Old files → Recycle Bin", True: "Keep old versions"}
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex[:12]
+
+
 @dataclass
 class Pair:
+    """One link between two folders, as the sync engine sees it.
+    left = the job's Main folder, right = a connected folder."""
     left: str
     right: str
     paused: bool = False
-    id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    id: str = field(default_factory=_new_id)
+    mode: str = "two-way"     # see MODES
+    versions: bool = False    # keep old versions instead of using the Recycle Bin
+    job: str = ""             # the job this link belongs to
+    names: tuple = ("Main", "folder")
+
+
+@dataclass
+class Member:
+    """A folder connected to a job's Main folder."""
+    path: str
+    mode: str = "two-way"
+    versions: bool = False
+    id: str = field(default_factory=_new_id)
+
+
+@dataclass
+class Job:
+    """A sync job: one Main folder and the folders connected to it."""
+    main: str
+    members: list = field(default_factory=list)   # list[Member]
+    paused: bool = False
+    id: str = field(default_factory=_new_id)
+
+    def links(self) -> list:
+        return [Pair(left=self.main, right=m.path, paused=self.paused, id=m.id, mode=m.mode,
+                     versions=m.versions, job=self.id, names=("Main", _name(m.path)))
+                for m in self.members]
+
+    def copy(self) -> "Job":
+        return Job(main=self.main, paused=self.paused, id=self.id,
+                   members=[Member(**vars(m)) for m in self.members])
+
+
+def _name(path: str) -> str:
+    return os.path.basename(path.rstrip("\\/")) or path
 
 
 @dataclass
 class Config:
-    pairs: list[Pair] = field(default_factory=list)
+    jobs: list = field(default_factory=list)      # list[Job]
     tray_hint_shown: bool = False
     theme: str = "auto"  # auto | light | dark
 
@@ -45,18 +96,31 @@ class Config:
                 raw = json.load(f)
         except (OSError, ValueError):
             return cls()
-        pairs = [Pair(**p) for p in raw.get("pairs", [])]
+        jobs = []
+        for j in raw.get("jobs", []):
+            members = [Member(path=m["path"], id=m.get("id") or _new_id(),
+                              mode=m.get("mode") if m.get("mode") in MODES else "two-way",
+                              versions=bool(m.get("versions", False)))
+                       for m in j.get("members", [])]
+            jobs.append(Job(main=j["main"], members=members, paused=j.get("paused", False),
+                            id=j.get("id") or _new_id()))
+        # Older versions stored simple pairs. Each becomes a job with one two-way folder;
+        # the folder keeps the pair's id, so its sync history still applies.
+        for p in raw.get("pairs", []):
+            jobs.append(Job(main=p["left"], paused=p.get("paused", False), id=p["id"],
+                            members=[Member(path=p["right"], id=p["id"])]))
         theme = raw.get("theme", "auto")
-        return cls(pairs=pairs, tray_hint_shown=raw.get("tray_hint_shown", False),
+        return cls(jobs=jobs, tray_hint_shown=raw.get("tray_hint_shown", False),
                    theme=theme if theme in ("auto", "light", "dark") else "auto")
 
     def save(self, path: str | None = None) -> None:
         path = path or os.path.join(data_dir(), "config.json")
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"pairs": [asdict(p) for p in self.pairs],
+            json.dump({"jobs": [{"id": j.id, "main": j.main, "paused": j.paused,
+                                 "members": [asdict(m) for m in j.members]} for j in self.jobs],
                        "tray_hint_shown": self.tray_hint_shown,
-                       "theme": self.theme}, f, indent=2)
+                       "theme": self.theme}, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
 
 
