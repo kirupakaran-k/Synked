@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from engine import Engine, LooksEmpty, Result, RootMissing, default_trash, rel_is_ignored
+from engine import (Engine, LooksEmpty, Progress, Result, RootMissing, default_trash,
+                    rel_is_ignored)
 from store import Config, Pair, StateDB, data_dir
 
 DEBOUNCE = 1.5          # seconds of quiet before syncing a burst of changes
@@ -32,6 +33,7 @@ class Status:
     message: str = ""
     last_sync: float = 0.0
     empty_side: int = -1
+    progress: Progress | None = None   # set while files are being copied
 
 
 @dataclass
@@ -152,7 +154,13 @@ class Controller:
 
     def snapshot(self) -> dict[str, Status]:
         with self._lock:
-            return {k: Status(**vars(v)) for k, v in self.status.items()}
+            out = {}
+            for k, v in self.status.items():
+                st = Status(**vars(v))
+                if v.progress is not None:
+                    st.progress = Progress(**vars(v.progress))
+                out[k] = st
+            return out
 
     def overall(self) -> str:
         """One word for the tray icon: synced | syncing | paused | error."""
@@ -165,8 +173,8 @@ class Controller:
             return "paused"
         return "synced"
 
-    def validate(self, left: str, right: str) -> str | None:
-        """An error message, or None if the pair is OK to add."""
+    def validate(self, left: str, right: str, ignore: str | None = None) -> str | None:
+        """An error message, or None if the pair is OK to add (or to change, for `ignore`)."""
         if not left or not right:
             return "Choose both folders."
         for p in (left, right):
@@ -175,6 +183,8 @@ class Controller:
         if _overlaps(left, right):
             return "The folders can't be the same or inside each other."
         for pair in self.pairs():
+            if pair.id == ignore:
+                continue
             for new in (left, right):
                 for old in (pair.left, pair.right):
                     if _overlaps(new, old):
@@ -190,6 +200,10 @@ class Controller:
         self._log(pair.id, "info", f"Started syncing {pair.left} ⇄ {pair.right}")
         self._command("resume", pair.id)
         return pair
+
+    def update_pair(self, pid: str, left: str, right: str) -> None:
+        """Point an existing pair at different folders (they're merged afresh)."""
+        self._command("edit", pid, os.path.abspath(left), os.path.abspath(right))
 
     def remove_pair(self, pid: str) -> None:
         self._command("remove", pid)
@@ -341,6 +355,20 @@ class Controller:
                     self._save()
                 self._set(pid, state="starting", message="")
                 self._start_pair(pair)
+            elif cmd == "edit":
+                left, right = args
+                self._unwatch(pid)
+                with self._lock:
+                    p = self._pair(pid)
+                    p.left, p.right = left, right
+                    self._pending.pop(pid, None)
+                    self._save()
+                self.db.delete_subtree(pid, "")  # old history doesn't apply to new folders
+                self.db.commit()
+                self._log(pid, "info", f"Changed to {left} ⇄ {right}")
+                if not p.paused:
+                    self._set(pid, state="starting", message="")
+                    self._start_pair(Pair(**vars(p)))
             elif cmd == "resolve":
                 apply_deletion = args[0]
                 self._set(pid, state="syncing", message="", empty_side=-1)
@@ -387,11 +415,19 @@ class Controller:
         pair = self._pair(pid)
         if pair is None or pair.paused:
             return
-        self._set(pid, state="syncing", message="")
+        self._set(pid, state="syncing", message="", progress=None)
         total = Result()
+
+        def on_progress(p: Progress):
+            with self._lock:
+                st = self.status.get(pid)
+                if st is not None:
+                    st.progress = p
+
         try:
             if pend.full:
-                total = self.engine.reconcile(pair, "", allow_empty=allow_empty)
+                total = self.engine.reconcile(pair, "", allow_empty=allow_empty,
+                                              progress=on_progress)
                 self._last_full[pid] = time.monotonic()
             else:
                 rels = set(pend.rels)
@@ -402,23 +438,23 @@ class Controller:
                         self._log(pid, "warn", f"Couldn't rename “{src}”: {e.strerror or e}")
                     rels.update((src, dst))
                 for rel in _collapse(rels):
-                    r = self.engine.reconcile(pair, rel)
+                    r = self.engine.reconcile(pair, rel, progress=on_progress)
                     total.copied += r.copied
                     total.deleted += r.deleted
                     total.replaced += r.replaced
                     total.failed += r.failed
         except RootMissing as e:
             self._unwatch(pid)
-            self._set(pid, state="error", message=str(e))
+            self._set(pid, progress=None, state="error", message=str(e))
             self._log(pid, "error", str(e))
             return
         except LooksEmpty as e:
-            self._set(pid, state="empty", empty_side=e.side,
+            self._set(pid, progress=None, state="empty", empty_side=e.side,
                       message=f"{e.path} is suddenly empty — paused to protect your files")
             self._log(pid, "warn", f"{e.path} is suddenly empty; waiting for you to decide")
             return
         except OSError as e:
-            self._set(pid, state="error", message=f"Couldn't read folder: {e.strerror or e}")
+            self._set(pid, progress=None, state="error", message=f"Couldn't read folder: {e.strerror or e}")
             self._log(pid, "error", f"Couldn't read folder: {e}")
             with self._lock:
                 self._retry.append((time.monotonic() + RETRY_AFTER, pid, ""))
@@ -429,10 +465,10 @@ class Controller:
                 due = time.monotonic() + RETRY_AFTER
                 self._retry += [(due, pid, rel) for rel in set(total.failed)]
             n = len(set(total.failed))
-            self._set(pid, state="waiting", last_sync=time.time(),
+            self._set(pid, state="waiting", last_sync=time.time(), progress=None,
                       message=f"{n} file{'s' if n > 1 else ''} in use — will retry")
         else:
-            self._set(pid, state="synced", message="", last_sync=time.time())
+            self._set(pid, state="synced", message="", last_sync=time.time(), progress=None)
 
 
 def _collapse(rels: set) -> list:

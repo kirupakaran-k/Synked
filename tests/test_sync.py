@@ -221,15 +221,15 @@ def test_mirror_rename_refused_when_other_side_changed(env):
 def test_busy_file_is_retried_not_lost(env, monkeypatch):
     import engine
     write(f"{env.L}/a.txt", "A")
-    real = engine.shutil.copy2
+    real = engine._copy_data
 
-    def locked(src, dst):
+    def locked(src, dst, on_bytes):
         raise PermissionError(13, "in use")
-    monkeypatch.setattr(engine.shutil, "copy2", locked)
+    monkeypatch.setattr(engine, "_copy_data", locked)
     r = env.sync()
     assert r.failed == ["a.txt"] and not os.path.exists(f"{env.R}/a.txt")
     assert [f for f in os.listdir(env.R)] == []  # no temp files left behind
-    monkeypatch.setattr(engine.shutil, "copy2", real)
+    monkeypatch.setattr(engine, "_copy_data", real)
     env.sync()
     assert read(f"{env.R}/a.txt") == "A"
 
@@ -369,3 +369,30 @@ def test_stale_temp_files_are_cleaned_up(env, monkeypatch):
     env.sync()
     assert not os.path.exists(temp)                  # stale: removed
     assert tree(env.L) == {}                         # and never synced to the other side
+
+
+def test_progress_is_reported(env):
+    import engine
+    big = b"x" * (engine.CHUNK * 3 + 10)
+    os.makedirs(f"{env.L}/d")
+    with open(f"{env.L}/d/big.bin", "wb") as f:
+        f.write(big)
+    write(f"{env.L}/small.txt", "s")
+    seen = []
+    env.eng.reconcile(env.pair, progress=lambda p: seen.append(
+        (p.action, p.rel, p.items_done, p.items_total, p.bytes_done, p.bytes_total)))
+    first, last = seen[0], seen[-1]
+    assert first[3] == 3 and first[5] == len(big) + 1          # d/, big.bin, small.txt
+    assert any(a == "copy" and r == os.path.join("d", "big.bin") for a, r, *_ in seen)
+    mids = [b for a, r, _, _, b, _ in seen if r.endswith("big.bin")]
+    assert len(set(mids)) >= 4                                  # bytes grew chunk by chunk
+    assert last[2] == last[3] and last[4] == last[5]            # finishes at 100 %
+    seen.clear()
+    env.eng.reconcile(env.pair, progress=lambda p: seen.append(p))
+    assert seen == []                                           # nothing to do -> no noise
+
+
+def test_copy_keeps_modified_time(env):
+    write(f"{env.L}/a.txt", "A", mtime=1_000_000)
+    env.sync()
+    assert int(os.stat(f"{env.R}/a.txt").st_mtime) == 1_000_000

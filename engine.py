@@ -154,6 +154,24 @@ class Result:
         return self.copied + self.deleted + self.renamed + self.replaced
 
 
+@dataclass
+class Progress:
+    """Live progress of one sync run, reported while it works."""
+    items_total: int = 0
+    items_done: int = 0
+    bytes_total: int = 0
+    bytes_done: int = 0
+    action: str = ""      # copy | update | recycle | rename
+    rel: str = ""         # the item being worked on
+    to_side: int = 1      # which side it's going to (0 = left, 1 = right)
+
+    @property
+    def fraction(self) -> float:
+        if self.bytes_total:
+            return min(1.0, self.bytes_done / self.bytes_total)
+        return min(1.0, self.items_done / self.items_total) if self.items_total else 0.0
+
+
 def default_trash(path: str, root: str) -> None:
     """Send to the Recycle Bin; if Windows refuses, park it in a hidden folder instead."""
     try:
@@ -182,7 +200,8 @@ class Engine:
 
     # ------------------------------------------------------------------ public
 
-    def reconcile(self, pair: Pair, rel: str = "", allow_empty: bool = False) -> Result:
+    def reconcile(self, pair: Pair, rel: str = "", allow_empty: bool = False,
+                  progress: Callable[[Progress], None] | None = None) -> Result:
         """Bring `rel` (and everything below it) in sync on both sides. rel="" = everything."""
         roots = (pair.left, pair.right)
         for i, r in enumerate(roots):
@@ -198,14 +217,27 @@ class Engine:
                     raise LooksEmpty(i, roots[i])
 
         res = Result()
+        keys = sorted(set(scans[0]) | set(scans[1]) | set(base))
+        # What looks changed (for the progress bar); the real decision is made per item.
+        todo = {k for k in keys if self._looks_changed(k, scans, base)}
+        prog = self._prog = Progress(
+            items_total=len(todo),
+            bytes_total=sum(self._copy_size(k, scans) for k in todo))
+        self._notify = progress or (lambda p: None)
+        if todo:
+            self._notify(prog)
         skip = None
-        for k in sorted(set(scans[0]) | set(scans[1]) | set(base)):
+        for k in keys:
             if skip and k.startswith(skip):
+                prog.items_done += k in todo
                 continue
             skip = None
             try:
                 if self._sync_one(pair, k, scans, base, res):
                     skip = k + os.sep
+                if k in todo:
+                    prog.items_done += 1
+                    self._notify(prog)
             except OSError as e:
                 item_rel = (scans[0].get(k) or scans[1].get(k) or base[k])[0]
                 res.failed.append(item_rel)
@@ -214,7 +246,33 @@ class Engine:
                 else:
                     self.log(pair.id, "error", f"Couldn't sync “{item_rel}”: {e.strerror or e}")
         self.db.commit()
+        if todo:
+            prog.items_done, prog.bytes_done, prog.rel = prog.items_total, prog.bytes_total, ""
+            self._notify(prog)
         return res
+
+    @staticmethod
+    def _looks_changed(k, scans, base) -> bool:
+        rec = base.get(k)
+        was = (rec[1], rec[2]) if rec else (None, None)
+        return any((scans[i][k][1] if k in scans[i] else None) != was[i] for i in (0, 1))
+
+    @staticmethod
+    def _copy_size(k, scans) -> int:
+        sizes = [scans[i][k][1][1] for i in (0, 1) if k in scans[i] and not scans[i][k][1][0]]
+        return max(sizes, default=0)
+
+    def _report(self, action: str, rel: str, to_side: int) -> None:
+        p = getattr(self, "_prog", None)
+        if p is not None:
+            p.action, p.rel, p.to_side = action, rel, to_side
+            self._notify(p)
+
+    def _add_bytes(self, n: int) -> None:
+        p = getattr(self, "_prog", None)
+        if p is not None:
+            p.bytes_done += n
+            self._notify(p)
 
     def mirror_move(self, pair: Pair, side: int, src_rel: str, dst_rel: str) -> bool:
         """A rename/move happened on `side`; repeat it on the other side instead of
@@ -317,6 +375,7 @@ class Engine:
             os.makedirs(os.path.join(roots[src], rel), exist_ok=True)
             self._record(pair, k, rel)
             return False
+        self._report("recycle", rel, dst)
         self.trash(os.path.join(roots[dst], rel), roots[dst])
         self.db.delete_subtree(pair.id, k)
         res.deleted += 1
@@ -344,7 +403,8 @@ class Engine:
         else:
             if d is not None and d[0]:
                 self.trash(dst_path, roots[dst])
-            _safe_copy(src_path, dst_path, s)
+            self._report("update" if d is not None or quiet else "copy", rel, dst)
+            _safe_copy(src_path, dst_path, s, self._add_bytes)
             res.copied += 0 if quiet else 1
             if not quiet:
                 self.log(pair.id, "info", f"Copied “{rel}” → {_side_name(dst)}")
@@ -382,13 +442,29 @@ def _actual_rel(root: str, rel: str) -> str | None:
     return None
 
 
-def _safe_copy(src: str, dst: str, expected: tuple) -> None:
+CHUNK = 1 << 20  # copy 1 MB at a time so progress can be reported
+
+
+def _copy_data(src: str, dst: str, on_bytes: Callable[[int], None]) -> None:
+    """Copy contents in chunks (reporting progress), then times/attributes like copy2."""
+    with open(src, "rb") as fs, open(dst, "wb") as fd:
+        while True:
+            buf = fs.read(CHUNK)
+            if not buf:
+                break
+            fd.write(buf)
+            on_bytes(len(buf))
+    shutil.copystat(src, dst)
+
+
+def _safe_copy(src: str, dst: str, expected: tuple,
+               on_bytes: Callable[[int], None] = lambda n: None) -> None:
     parent = os.path.dirname(dst)
     os.makedirs(parent, exist_ok=True)
     tmp = os.path.join(parent, f"{TEMP_PREFIX}{uuid.uuid4().hex[:8]}.tmp")
     try:
         try:
-            shutil.copy2(src, tmp)
+            _copy_data(src, tmp, on_bytes)
         except PermissionError as e:
             raise Busy(e.errno, e.strerror, src) from e
         if stat_path(src) != expected:

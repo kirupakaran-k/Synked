@@ -4,11 +4,10 @@ from __future__ import annotations
 import argparse
 import os
 import queue
-import subprocess
 import sys
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import messagebox, ttk
 import tkinter.font as tkfont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,7 +17,9 @@ from PIL import ImageTk  # noqa: E402
 
 from icon import COLORS, make_icon, save_ico  # noqa: E402
 from store import data_dir  # noqa: E402
-from widgets import SlideSwitch, gear, plus  # noqa: E402
+from widgets import SlideSwitch, dots, gear, plus  # noqa: E402
+from cards import PairCard  # noqa: E402
+from ui_common import IS_WIN, PALETTE, open_folder  # noqa: E402
 from watcher import Controller  # noqa: E402
 
 try:  # drag-and-drop of folders from File Explorer (optional; app works without it)
@@ -31,26 +32,10 @@ try:
 except Exception:  # pragma: no cover
     darkdetect = None
 
-IS_WIN = os.name == "nt"
 APP = "SyncMate"
-VERSION = "1.3"  # shown in Settings, so you can tell which build is running
+VERSION = "1.4"  # shown in Settings, so you can tell which build is running
 SHOW_FLAG = os.path.join(data_dir(), "show.flag")   # "please show your window"
 QUIT_FLAG = os.path.join(data_dir(), "quit.flag")   # "please quit" (used by build.bat)
-ONEDRIVE = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or ""
-
-PALETTE = {
-    # bg matches the Sun Valley theme's own background colours
-    "light": {"bg": "#fafafa", "fg": "#1c1c1c", "muted": "#5F6670", "error": "#C42B1C",
-              "track": "#E9E9EC", "thumb": "#005FB8", "on_thumb": "#FFFFFF"},
-    "dark": {"bg": "#1c1c1c", "fg": "#F2F2F2", "muted": "#A3A9B2", "error": "#FF8A80",
-             "track": "#2E2E2E", "thumb": "#57C8FF", "on_thumb": "#101010"},
-}
-STATE_COLOR = {
-    "synced": COLORS["synced"], "syncing": COLORS["syncing"], "starting": COLORS["syncing"],
-    "waiting": COLORS["syncing"], "paused": COLORS["paused"], "error": COLORS["error"],
-    "empty": COLORS["error"],
-}
-
 
 # ============================================================== Windows helpers
 
@@ -126,48 +111,6 @@ def set_autostart(on: bool) -> None:
                 pass
 
 
-def open_folder(path: str) -> None:
-    if IS_WIN:
-        os.startfile(path)  # noqa
-    else:
-        subprocess.Popen(["xdg-open", path])
-
-
-# ============================================================== formatting
-
-def pretty_path(path: str) -> str:
-    if ONEDRIVE and os.path.normcase(path).startswith(os.path.normcase(ONEDRIVE)):
-        path = "OneDrive" + path[len(ONEDRIVE):]
-    return path
-
-
-def elide(s: str, n: int = 46) -> str:
-    return s if len(s) <= n else s[: n // 2 - 1] + "…" + s[-(n // 2):]
-
-
-def ago(t: float) -> str:
-    if not t:
-        return ""
-    s = time.time() - t
-    if s < 60:
-        return "just now"
-    if s < 3600:
-        return f"{int(s // 60)} min ago"
-    if s < 86400:
-        return f"{int(s // 3600)} h ago"
-    return time.strftime("%d %b, %H:%M", time.localtime(t))
-
-
-def describe(st) -> str:
-    if st.state == "synced":
-        return f"In sync · {ago(st.last_sync)}"
-    if st.state in ("syncing", "starting"):
-        return "Syncing…"
-    if st.state == "paused":
-        return "Paused"
-    return st.message.replace(ONEDRIVE, "OneDrive") if ONEDRIVE else st.message
-
-
 # ============================================================== UI
 
 class App:
@@ -175,6 +118,9 @@ class App:
         self.ctrl = ctrl
         self.q: queue.Queue = queue.Queue()
         self.cards: dict = {}
+        self.card_sig = None
+        self.expanded = None   # key of the expanded card: a pair id, "new", or None
+        self._draft = False    # is the "New folder sync" card showing?
         self.card_ids = None
         self.activity_win = None
         self.tray = None
@@ -246,14 +192,9 @@ class App:
         """Folders dropped on the main window: open (or fill) the Add folder pair dialog."""
         folders = [p for p in paths if os.path.isdir(p)]
         if not folders:
-            self._flash_summary("Drop folders, not files, to add a pair.")
+            self._flash_summary("Drop folders, not files, to add a folder sync.")
             return
-        dlg = getattr(self, "add_win", None)
-        if dlg and dlg.win.winfo_exists():
-            dlg.fill(folders)
-            dlg.win.lift()
-        else:
-            self.add_win = AddDialog(self, prefill=folders)
+        self.new_sync(prefill=folders)
 
     def _flash_summary(self, text: str, ms: int = 2500) -> None:
         self._summary_override = text
@@ -345,7 +286,7 @@ class App:
         self._retint()
         self._theme_custom_widgets()
         dark_titlebar(self.root, theme == "dark")
-        self.card_ids = None  # force rebuild
+        self.card_sig = None  # force rebuild
         self.refresh()
 
     def tint(self, w, role="muted"):
@@ -376,8 +317,8 @@ class App:
         ttk.Label(head, text=APP, style="Title.TLabel").grid(row=0, column=0, sticky="w")
         self.summary = self.tint(ttk.Label(head, text="", style="Muted.TLabel"))
         self.summary.grid(row=1, column=0, sticky="w", pady=(px(2), 0))
-        self.add_btn = ttk.Button(head, text=" Add folder pair", style="Accent.TButton",
-                                  compound="left", command=self.add_dialog)
+        self.add_btn = ttk.Button(head, text=" Add folder sync", style="Accent.TButton",
+                                  compound="left", command=self.new_sync)
         self.add_btn.grid(row=0, column=1, rowspan=2, sticky="e")
         self.gear_btn = ttk.Button(head, style="Icon.TButton", command=self.toggle_settings)
         self.gear_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(px(8), 0))
@@ -415,7 +356,7 @@ class App:
         self.drop_target(root, self.on_main_drop, self._main_hover)
 
     def _main_hover(self, over: bool) -> None:
-        self._summary_override = "Drop to add a folder pair" if over else None
+        self._summary_override = "Drop to add a folder sync" if over else None
         self.refresh()
 
     # ---------------------------------------------------------------- settings panel
@@ -456,6 +397,7 @@ class App:
         pal = PALETTE[self.theme]
         line = self._line_height()
         self._gear_img = ImageTk.PhotoImage(gear(line, pal["fg"]))
+        self._dots_img = ImageTk.PhotoImage(dots(line, pal["fg"]))
         self.gear_btn.configure(image=self._gear_img)
         ttk.Style().configure("Icon.TButton", padding=(6, 2, 6, 3))
         self._plus_img = ImageTk.PhotoImage(plus(line, pal["on_thumb"]))
@@ -501,34 +443,145 @@ class App:
     def refresh(self):
         pairs = self.ctrl.pairs()
         snap = self.ctrl.snapshot()
-        ids = [p.id for p in pairs]
-        if ids != self.card_ids:
+        sig = [(p.id, p.left, p.right) for p in pairs] + (["new"] if self.draft_open else [])
+        if sig != self.card_sig:
             self._rebuild(pairs)
-            self.card_ids = ids
+            self.card_sig = sig
         for p in pairs:
-            st = snap.get(p.id)
-            if st is None or p.id not in self.cards:
-                continue
-            c = self.cards[p.id]
-            color = STATE_COLOR.get(st.state, COLORS["paused"])
-            c["dot"].itemconfigure("dot", fill=color, outline=color)
-            bad = st.state in ("error", "empty")
-            c["status"].configure(text=describe(st),
-                                  foreground=PALETTE[self.theme]["error" if bad else "muted"])
-            if st.state == "empty":
-                if not c["fix"].winfo_ismapped():
-                    other = p.right if st.empty_side == 0 else p.left
-                    c["fix_restore"].configure(text="Restore files")
-                    c["fix_delete"].configure(text=f"Delete in {elide(os.path.basename(other) or other, 20)} too")
-                    c["fix"].grid()
-            elif c["fix"].winfo_ismapped():
-                c["fix"].grid_remove()
-            c["pause_label"] = "Resume" if p.paused else "Pause"
+            st, card = snap.get(p.id), self.cards.get(p.id)
+            if st is not None and card is not None:
+                card.update(st, p)
         self._update_summary(pairs, snap)
+
+    def _rebuild(self, pairs):
+        draft = self.cards.get("new")
+        kept = draft.values() if draft else None
+        for w in self.list.winfo_children():
+            w.destroy()
+        self.cards = {}
+        row = 0
+        if self.draft_open:
+            card = self.cards["new"] = PairCard(self, self.list, row)
+            if kept:
+                card.a.set(kept[0])
+                card.b.set(kept[1])
+            row += 1
+        for p in pairs:
+            self.cards[p.id] = PairCard(self, self.list, row, p)
+            row += 1
+        if not self.cards:
+            self._empty_state()
+        if self.expanded in self.cards:
+            self.cards[self.expanded].expand(reset=self.expanded != "new")
+        else:
+            self.expanded = None
+
+    def _empty_state(self):
+        px = self.px
+        box = ttk.Frame(self.list, padding=(0, px(50)))
+        box.grid(row=0, column=0)
+        self._big_icon = ImageTk.PhotoImage(make_icon("synced", px(72)))
+        ttk.Label(box, image=self._big_icon).pack(pady=(0, px(14)))
+        ttk.Label(box, text="Keep any two folders in sync", style="Name.TLabel").pack()
+        self.tint(ttk.Label(box, text="Pick a folder on your PC and one in OneDrive (or anywhere).\n"
+                                      "Changes flow both ways, automatically.\n\n"
+                                      "Tip: you can drag folders onto this window.",
+                            style="Muted.TLabel", justify="center")).pack(pady=(px(4), px(16)))
+        ttk.Button(box, text="Add your first folder sync", style="Accent.TButton",
+                   command=self.new_sync).pack()
+
+    # ---------------------------------------------------------------- expanding cards
+
+    @property
+    def draft_open(self) -> bool:
+        return self._draft
+
+    def set_expanded(self, key) -> None:
+        """Expand one card in place (only one at a time); None collapses all."""
+        if self.expanded == key:
+            return
+        if self.expanded == "new" and key != "new":
+            self._draft = False          # leaving the new-sync card discards it
+        old = self.cards.get(self.expanded)
+        if old is not None:
+            old.collapse()
+        self.expanded = key
+        self.refresh()
+        card = self.cards.get(key)
+        if card is not None:
+            card.expand()
+            self.ensure_visible(card.frame)
+
+    def new_sync(self, prefill=()) -> None:
+        """Show the blank 'New folder sync' card at the top of the list."""
+        self.hide_settings()
+        if not self._draft:
+            self._draft = True
+            self.set_expanded(None)
+            self._draft = True
+            self.expanded = "new"
+            self.refresh()
+        card = self.cards["new"]
+        card.expand(reset=False)
+        if prefill:
+            card.fill(prefill)
+        self.canvas.yview_moveto(0)
+        card.a_box.focus_set()
+
+    def close_draft(self) -> None:
+        self._draft = False
+        if self.expanded == "new":
+            self.expanded = None
+        self.refresh()
+
+    def ensure_visible(self, widget) -> None:
+        self.root.update_idletasks()
+        total = max(1, self.list.winfo_height())
+        top = widget.winfo_y()
+        bottom = top + widget.winfo_height()
+        view_top, view_bottom = (f * total for f in self.canvas.yview())
+        if bottom > view_bottom:
+            self.canvas.yview_moveto(max(0, bottom - (view_bottom - view_top)) / total)
+        elif top < view_top:
+            self.canvas.yview_moveto(top / total)
+
+    def prepare_folders(self, a: str, b: str, ignore=None):
+        """Check two folders can be synced; create ones that don't exist yet.
+        Returns an error message, or None if all is well."""
+        created = []
+        if a and b:
+            for p in (a, b):
+                if not os.path.exists(p) and os.path.isdir(os.path.dirname(os.path.abspath(p))):
+                    created.append(p)
+        try:
+            for p in created:
+                os.makedirs(p)
+        except OSError as e:
+            return f"Couldn't create “{p}”: {e.strerror}"
+        problem = self.ctrl.validate(a, b, ignore=ignore)
+        if problem:
+            for p in created:
+                try:
+                    os.rmdir(p)
+                except OSError:
+                    pass
+        return problem
+
+    def confirm_delete(self, pid):
+        pair = next((p for p in self.ctrl.pairs() if p.id == pid), None)
+        st = self.ctrl.snapshot().get(pid)
+        if not pair or not st:
+            return
+        empty = pair.left if st.empty_side == 0 else pair.right
+        other = pair.right if st.empty_side == 0 else pair.left
+        if messagebox.askyesno(
+                APP, f"{empty} is empty.\n\nDelete the same files in\n{other}?\n\n"
+                     "They'll go to the Recycle Bin.", icon="warning", parent=self.root):
+            self.ctrl.resolve_empty(pid, True)
 
     def _update_summary(self, pairs, snap):
         if not pairs:
-            text = "Add a pair of folders and SyncMate keeps them identical."
+            text = "Add a folder sync and SyncMate keeps the two folders identical."
         else:
             overall = self.ctrl.overall()
             states = {st.state for st in snap.values()}
@@ -536,7 +589,7 @@ class App:
                 overall = "waiting"
             n = len(pairs)
             text = {
-                "synced": f"{n} folder pair{'s' if n > 1 else ''} · everything is in sync",
+                "synced": f"{n} folder sync{'s' if n > 1 else ''} · everything is in sync",
                 "syncing": "Syncing changes…",
                 "waiting": "Some files are in use — they'll sync when they're closed",
                 "paused": "All syncing is paused",
@@ -551,118 +604,6 @@ class App:
                 self._tray_state = state
                 self.tray.icon = make_icon(state, 64)
                 self.tray.title = f"{APP} — {text}"
-
-    def _rebuild(self, pairs):
-        for w in self.list.winfo_children():
-            w.destroy()
-        self.cards = {}
-        px = self.px
-        if not pairs:
-            self._empty_state()
-            return
-        for i, p in enumerate(pairs):
-            card = ttk.Frame(self.list, style="Card.TFrame", padding=(px(16), px(12)))
-            card.grid(row=i, column=0, sticky="ew", pady=(0, px(10)))
-            card.columnconfigure(1, weight=1, uniform="side")
-            card.columnconfigure(3, weight=1, uniform="side")
-
-            dot = tk.Canvas(card, width=px(10), height=px(10), highlightthickness=0,
-                            background=self.card_bg)
-            dot.create_oval(1, 1, px(10) - 1, px(10) - 1, tags="dot")
-            dot.grid(row=0, column=0, sticky="w", padx=(0, px(12)))
-
-            for col, path in ((1, p.left), (3, p.right)):
-                box = tk.Frame(card, background=self.card_bg, highlightthickness=0, bd=0)
-                box.grid(row=0, column=col, sticky="ew")
-                name = os.path.basename(path.rstrip("\\/")) or path
-                ttk.Label(box, text=name, style="Card.Name.TLabel").pack(anchor="w")
-                self.tint(ttk.Label(box, text=elide(pretty_path(os.path.dirname(path)) or path, 44),
-                                    style="Card.Muted.TLabel")).pack(anchor="w")
-            self.tint(ttk.Label(card, text="⇄", style="Card.Arrow.TLabel")).grid(
-                row=0, column=2, padx=px(14))
-
-            more = ttk.Button(card, text="⋯", width=3, style="Ghost.TButton")
-            more.grid(row=0, column=4, sticky="e", padx=(px(10), 0))
-            more.configure(command=lambda b=more, pid=p.id: self._menu(b, pid))
-
-            status = self.tint(ttk.Label(card, text="", style="Card.Muted.TLabel"))
-            status.grid(row=1, column=1, columnspan=3, sticky="w", pady=(px(8), 0))
-
-            fix = tk.Frame(card, background=self.card_bg, highlightthickness=0, bd=0)
-            fix.grid(row=2, column=1, columnspan=3, sticky="w", pady=(px(8), 0))
-            r = ttk.Button(fix, style="Accent.TButton",
-                           command=lambda pid=p.id: self.ctrl.resolve_empty(pid, False))
-            r.pack(side="left", padx=(0, px(8)))
-            d = ttk.Button(fix, command=lambda pid=p.id: self._confirm_delete(pid))
-            d.pack(side="left")
-            fix.grid_remove()
-            self.cards[p.id] = dict(dot=dot, status=status, fix=fix, fix_restore=r,
-                                    fix_delete=d, pause_label="Pause")
-
-    def _empty_state(self):
-        px = self.px
-        box = ttk.Frame(self.list, padding=(0, px(50)))
-        box.grid(row=0, column=0)
-        self._big_icon = ImageTk.PhotoImage(make_icon("synced", px(72)))
-        ttk.Label(box, image=self._big_icon).pack(pady=(0, px(14)))
-        ttk.Label(box, text="Keep any two folders in sync", style="Name.TLabel").pack()
-        self.tint(ttk.Label(box, text="Pick a folder on your PC and one in OneDrive (or anywhere).\n"
-                                      "Changes flow both ways, automatically.\n\n"
-                                      "Tip: you can drag folders onto this window.",
-                            style="Muted.TLabel", justify="center")).pack(pady=(px(4), px(16)))
-        ttk.Button(box, text="Add your first pair", style="Accent.TButton",
-                   command=self.add_dialog).pack()
-
-    def _menu(self, button, pid):
-        pair = next((p for p in self.ctrl.pairs() if p.id == pid), None)
-        if pair is None:
-            return
-        m = tk.Menu(self.root, tearoff=False)
-        m.add_command(label="Resume" if pair.paused else "Pause",
-                      command=lambda: self.ctrl.set_paused(pid, not pair.paused))
-        m.add_command(label="Sync now", command=lambda: self.ctrl.sync_now(pid),
-                      state="disabled" if pair.paused else "normal")
-        m.add_separator()
-        m.add_command(label=f"Open {elide(os.path.basename(pair.left) or pair.left, 30)}",
-                      command=lambda: open_folder(pair.left))
-        m.add_command(label=f"Open {elide(os.path.basename(pair.right) or pair.right, 30)}",
-                      command=lambda: open_folder(pair.right))
-        m.add_separator()
-        m.add_command(label="Stop syncing this pair…", command=lambda: self._remove(pair))
-        x = button.winfo_rootx()
-        y = button.winfo_rooty() + button.winfo_height()
-        try:
-            m.tk_popup(x, y)
-        finally:
-            m.grab_release()
-
-    def _remove(self, pair):
-        if messagebox.askyesno(
-                APP, "Stop syncing these folders?\n\n"
-                     f"{pair.left}\n⇄\n{pair.right}\n\nYour files stay where they are.",
-                parent=self.root):
-            self.ctrl.remove_pair(pair.id)
-
-    def _confirm_delete(self, pid):
-        pair = next((p for p in self.ctrl.pairs() if p.id == pid), None)
-        st = self.ctrl.snapshot().get(pid)
-        if not pair or not st:
-            return
-        empty = pair.left if st.empty_side == 0 else pair.right
-        other = pair.right if st.empty_side == 0 else pair.left
-        if messagebox.askyesno(
-                APP, f"{empty} is empty.\n\nDelete the same files in\n{other}?\n\n"
-                     "They'll go to the Recycle Bin.", icon="warning", parent=self.root):
-            self.ctrl.resolve_empty(pid, True)
-
-    # ---------------------------------------------------------------- dialogs
-
-    def add_dialog(self):
-        dlg = getattr(self, "add_win", None)
-        if dlg and dlg.win.winfo_exists():
-            dlg.win.lift()
-            return
-        self.add_win = AddDialog(self)
 
     def show_activity(self):
         if self.activity_win and self.activity_win.winfo_exists():
@@ -765,144 +706,11 @@ class App:
         self.refresh()
         if self.activity_win and self.activity_win.winfo_exists():
             self.activity_win.refresh()
-        self.root.after(600, self._poll)
+        busy = any(st.state in ("syncing", "starting") for st in self.ctrl.snapshot().values())
+        self.root.after(200 if busy else 600, self._poll)
 
     def run(self):
         self.root.mainloop()
-
-
-class AddDialog:
-    def __init__(self, app: App, prefill=None):
-        self.app = app
-        px = app.px
-        self.win = win = tk.Toplevel(app.root)
-        win.withdraw()
-        win.title("Add folder pair")
-        win.transient(app.root)
-        win.resizable(False, False)
-        f = ttk.Frame(win, padding=px(22))
-        f.pack(fill="both", expand=True)
-        f.columnconfigure(0, weight=1)
-
-        ttk.Label(f, text="Add folder pair", style="Title.TLabel").grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, px(14)))
-        self.a = tk.StringVar()
-        self.b = tk.StringVar()
-        self.a_box = self._field(f, 1, "Folder A", self.a, "This folder…", self._pick_a)
-        self.b_box = self._field(f, 3, "Folder B", self.b, "…stays identical to this one",
-                                 self._pick_b, combo=True)
-        self.a.trace_add("write", lambda *_: self._suggest())
-        for box, which in ((self.a_box, "a"), (self.b_box, "b")):
-            app.drop_target(box, lambda paths, w=which: self.on_drop(w, paths),
-                            lambda over, b=box: b.state(["focus"] if over else ["!focus"]))
-
-        app.tint(ttk.Label(f, style="Muted.TLabel", wraplength=px(440), justify="left", text=(
-            "Tip: pick a folder inside OneDrive as Folder B to back Folder A up to the cloud. "
-            "A folder that doesn't exist yet will be created. You can also drag folders "
-            "from File Explorer onto the boxes.\n\n"
-            "If both already contain files, they're merged. Where the same file differs, the "
-            "newer one is kept and the older one goes to the Recycle Bin."))).grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(px(14), 0))
-        self.err = app.tint(ttk.Label(f, text="", style="Error.TLabel", wraplength=px(440)), "error")
-        self.err.grid(row=6, column=0, columnspan=2, sticky="w", pady=(px(8), 0))
-
-        btns = ttk.Frame(f)
-        btns.grid(row=7, column=0, columnspan=2, sticky="e", pady=(px(14), 0))
-        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=(0, px(8)))
-        ttk.Button(btns, text="Start syncing", style="Accent.TButton",
-                   command=self._ok).pack(side="left")
-        win.bind("<Escape>", lambda e: win.destroy())
-        win.bind("<Return>", lambda e: self._ok())
-
-        win.update_idletasks()
-        r = app.root
-        if r.winfo_viewable():
-            x = r.winfo_rootx() + (r.winfo_width() - win.winfo_reqwidth()) // 2
-            y = r.winfo_rooty() + (r.winfo_height() - win.winfo_reqheight()) // 3
-            win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
-        win.deiconify()
-        dark_titlebar(win, app.theme == "dark")
-        win.grab_set()
-        if prefill:
-            self.fill(prefill)
-
-    def fill(self, folders) -> None:
-        """Put dropped folders into the empty boxes (A first)."""
-        for p in folders:
-            if not self.a.get().strip():
-                self.a.set(p)
-            elif not self.b.get().strip():
-                self.b.set(p)
-
-    def on_drop(self, which: str, paths) -> None:
-        """Folders dropped on box `which` ("a" or "b"). Two folders fill both boxes."""
-        folders = [p for p in paths if os.path.isdir(p)]
-        if not folders:
-            self.err.configure(text="That's a file. Drop a folder instead.")
-            return
-        self.err.configure(text="")
-        if len(folders) >= 2:
-            self.a.set(folders[0])
-            self.b.set(folders[1])
-        else:
-            (self.a if which == "a" else self.b).set(folders[0])
-
-    def _field(self, f, row, label, var, hint, pick, combo=False):
-        px = self.app.px
-        top = ttk.Frame(f)
-        top.grid(row=row, column=0, columnspan=2, sticky="w", pady=(px(6), px(4)))
-        ttk.Label(top, text=label, style="Name.TLabel").pack(side="left")
-        self.app.tint(ttk.Label(top, text="   " + hint, style="Muted.TLabel")).pack(side="left")
-        e = (ttk.Combobox(f, textvariable=var, width=50, values=[]) if combo
-             else ttk.Entry(f, textvariable=var, width=52))
-        e.grid(row=row + 1, column=0, sticky="ew")
-        ttk.Button(f, text="Browse…", command=pick).grid(row=row + 1, column=1, padx=(px(8), 0))
-        return e
-
-    def _suggest(self):
-        """Offer OneDrive\\<name of Folder A> in Folder B's dropdown (never filled in automatically)."""
-        a = self.a.get().strip().strip('"')
-        name = os.path.basename(os.path.normpath(a)) if a else ""
-        self.b_box.configure(values=[os.path.join(ONEDRIVE, name)] if ONEDRIVE and name else [])
-
-    def _pick_a(self):
-        p = filedialog.askdirectory(parent=self.win, title="Choose Folder A", mustexist=True)
-        if p:
-            self.a.set(os.path.normpath(p))
-
-    def _pick_b(self):
-        p = filedialog.askdirectory(parent=self.win, title="Choose Folder B", mustexist=True)
-        if p:
-            self.b.set(os.path.normpath(p))
-
-    def _ok(self):
-        a, b = self.a.get().strip().strip('"'), self.b.get().strip().strip('"')
-        created = []
-        if a and b:
-            for p in (a, b):
-                if not os.path.exists(p) and os.path.isdir(os.path.dirname(os.path.abspath(p))):
-                    created.append(p)
-        problem = self.app.ctrl.validate(a, b) if not created else None
-        if created:
-            # validate as if they existed, by checking overlaps only after creating
-            try:
-                for p in created:
-                    os.makedirs(p)
-            except OSError as e:
-                self.err.configure(text=f"Couldn't create “{p}”: {e.strerror}")
-                return
-            problem = self.app.ctrl.validate(a, b)
-            if problem:
-                for p in created:
-                    try:
-                        os.rmdir(p)
-                    except OSError:
-                        pass
-        if problem:
-            self.err.configure(text=problem)
-            return
-        self.app.ctrl.add_pair(a, b)
-        self.win.destroy()
 
 
 class ActivityWindow:

@@ -34,6 +34,17 @@ def gear(size: int, color: str) -> Image.Image:
     return im.resize((size, size), Image.LANCZOS)
 
 
+def dots(size: int, color: str) -> Image.Image:
+    """Three vertical dots (the 'more options' icon)."""
+    S = size * SUPER
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    r = S * 0.095
+    for cy in (S * 0.2, S * 0.5, S * 0.8):
+        d.ellipse((S / 2 - r, cy - r, S / 2 + r, cy + r), fill=color)
+    return im.resize((size, size), Image.LANCZOS)
+
+
 def plus(size: int, color: str) -> Image.Image:
     """A big, bold plus sign filling one text line."""
     S = size * SUPER
