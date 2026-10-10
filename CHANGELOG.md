@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 1.0.8 - Same-height buttons, activity log in settings
+
+All buttons the same height, big bold + on Add folder pair, larger Theme label, activity log moved into settings.
+
 ## 1.0.7 - Settings panel with theme slider
 
 Gear button opens a settings panel with Start with Windows and a sliding Auto/Light/Dark switch; build.bat closes its own window when done.

@@ -18,7 +18,7 @@ from PIL import ImageTk  # noqa: E402
 
 from icon import COLORS, make_icon  # noqa: E402
 from store import data_dir  # noqa: E402
-from widgets import SlideSwitch, gear  # noqa: E402
+from widgets import SlideSwitch, gear, plus  # noqa: E402
 from watcher import Controller  # noqa: E402
 
 try:
@@ -229,6 +229,13 @@ class App:
         self.f_small = tkfont.Font(family=body, size=9)
         self.f_arrow = tkfont.Font(family=body, size=14)
 
+    def _line_height(self) -> int:
+        """Height of one line of button text; icons this tall keep buttons the same height."""
+        try:
+            return tkfont.nametofont("SunValleyBodyFont").metrics("linespace")
+        except tk.TclError:
+            return self.f_body.metrics("linespace")
+
     def _styles(self):
         pal = PALETTE[self.theme]
         s = ttk.Style()
@@ -238,12 +245,12 @@ class App:
         s.configure("Name.TLabel", font=self.f_bold)
         s.configure("Arrow.TLabel", font=self.f_arrow, foreground=pal["muted"])
         s.configure("Error.TLabel", font=self.f_small, foreground=pal["error"])
-        s.configure("Ghost.TButton", padding=(self.px(8), self.px(2)))
         self.bg = self.card_bg = pal["bg"]
         s.configure("Inner.TFrame", background=self.card_bg)
         for name in ("Name", "Muted", "Arrow", "Error", "Body"):
             s.configure(f"Card.{name}.TLabel", background=self.card_bg)
         s.configure("Card.Name.TLabel", font=self.f_bold)
+        s.configure("Card.Body.TLabel", font=self.f_body)
         s.configure("Card.Muted.TLabel", font=self.f_small, foreground=pal["muted"])
         s.configure("Card.Arrow.TLabel", font=self.f_arrow, foreground=pal["muted"])
         s.configure("Card.Error.TLabel", font=self.f_small, foreground=pal["error"])
@@ -287,8 +294,9 @@ class App:
         ttk.Label(head, text=APP, style="Title.TLabel").grid(row=0, column=0, sticky="w")
         self.summary = self.tint(ttk.Label(head, text="", style="Muted.TLabel"))
         self.summary.grid(row=1, column=0, sticky="w", pady=(px(2), 0))
-        ttk.Button(head, text="＋  Add folder pair", style="Accent.TButton",
-                   command=self.add_dialog).grid(row=0, column=1, rowspan=2, sticky="e")
+        self.add_btn = ttk.Button(head, text=" Add folder pair", style="Accent.TButton",
+                                  compound="left", command=self.add_dialog)
+        self.add_btn.grid(row=0, column=1, rowspan=2, sticky="e")
         self.gear_btn = ttk.Button(head, style="Icon.TButton", command=self.toggle_settings)
         self.gear_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(px(8), 0))
 
@@ -314,10 +322,8 @@ class App:
         foot = ttk.Frame(outer)
         foot.grid(row=2, column=0, sticky="ew", pady=(px(12), 0))
         foot.columnconfigure(0, weight=1)
-        ttk.Button(foot, text="Activity", command=self.show_activity).grid(
-            row=0, column=1, padx=(0, px(8)))
         ttk.Button(foot, text="Sync now", command=lambda: self.ctrl.sync_now()).grid(
-            row=0, column=2)
+            row=0, column=1)
 
         self._build_settings()
         self._theme_custom_widgets()
@@ -341,18 +347,29 @@ class App:
             auto.state(["disabled"])
 
         ttk.Separator(p).grid(row=2, column=0, sticky="ew", pady=px(12))
-        self.tint(ttk.Label(p, text="Theme", style="Card.Muted.TLabel")).grid(
-            row=3, column=0, sticky="w", pady=(0, px(6)))
+        self.tint(ttk.Label(p, text="Theme", style="Card.Body.TLabel"), "fg").grid(
+            row=3, column=0, sticky="w", pady=(0, px(8)))
         self.theme_switch = SlideSwitch(
             p, [("auto", "Auto"), ("light", "Light"), ("dark", "Dark")],
             self.ctrl.config.theme, self.set_theme_pref, scale=self.S, font=self.f_body)
         self.theme_switch.grid(row=4, column=0, sticky="w")
 
+        ttk.Separator(p).grid(row=5, column=0, sticky="ew", pady=px(12))
+        ttk.Button(p, text="View activity log", command=self._activity_from_settings).grid(
+            row=6, column=0, sticky="ew")
+
+    def _activity_from_settings(self):
+        self.hide_settings()
+        self.show_activity()
+
     def _theme_custom_widgets(self):
         pal = PALETTE[self.theme]
-        self._gear_img = ImageTk.PhotoImage(gear(self.px(18), pal["fg"]))
+        line = self._line_height()
+        self._gear_img = ImageTk.PhotoImage(gear(line, pal["fg"]))
         self.gear_btn.configure(image=self._gear_img)
-        ttk.Style().configure("Icon.TButton", padding=(self.px(7), self.px(6)))
+        ttk.Style().configure("Icon.TButton", padding=(6, 2, 6, 3))
+        self._plus_img = ImageTk.PhotoImage(plus(line, pal["on_thumb"]))
+        self.add_btn.configure(image=self._plus_img)
         self.theme_switch.set_colors({"bg": self.card_bg, "track": pal["track"],
                                       "thumb": pal["thumb"], "text": pal["muted"],
                                       "text_on": pal["on_thumb"]})

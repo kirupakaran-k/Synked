@@ -34,6 +34,18 @@ def gear(size: int, color: str) -> Image.Image:
     return im.resize((size, size), Image.LANCZOS)
 
 
+def plus(size: int, color: str) -> Image.Image:
+    """A big, bold plus sign filling one text line."""
+    S = size * SUPER
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    arm, t = S * 0.44, S * 0.13          # half-length and half-thickness of each bar
+    c = S / 2
+    d.rounded_rectangle((c - arm, c - t, c + arm, c + t), radius=int(t * 0.6), fill=color)
+    d.rounded_rectangle((c - t, c - arm, c + t, c + arm), radius=int(t * 0.6), fill=color)
+    return im.resize((size, size), Image.LANCZOS)
+
+
 class SlideSwitch(tk.Canvas):
     """A pill-shaped multi-way switch whose highlight slides to the chosen option.
 
