@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sv_ttk  # noqa: E402
 from PIL import ImageTk  # noqa: E402
 
-from icon import COLORS, make_icon  # noqa: E402
+from icon import COLORS, make_icon, save_ico  # noqa: E402
 from store import data_dir  # noqa: E402
 from widgets import SlideSwitch, gear, plus  # noqa: E402
 from watcher import Controller  # noqa: E402
@@ -28,6 +28,7 @@ except Exception:  # pragma: no cover
 
 IS_WIN = os.name == "nt"
 APP = "SyncMate"
+VERSION = "1.1"  # shown in Settings, so you can tell which build is running
 SHOW_FLAG = os.path.join(data_dir(), "show.flag")   # "please show your window"
 QUIT_FLAG = os.path.join(data_dir(), "quit.flag")   # "please quit" (used by build.bat)
 ONEDRIVE = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or ""
@@ -179,8 +180,7 @@ class App:
         self.S = root.winfo_fpixels("1i") / 96  # display scale
         root.geometry(f"{self.px(760)}x{self.px(500)}")
         root.minsize(self.px(560), self.px(380))
-        self._icon_img = ImageTk.PhotoImage(make_icon("synced", 64))
-        root.iconphoto(True, self._icon_img)
+        self._set_window_icon()
 
         self.theme = self._wanted_theme()
         sv_ttk.set_theme(self.theme)
@@ -196,6 +196,20 @@ class App:
         root.after(200, self._poll)
 
     # ---------------------------------------------------------------- look & feel
+
+    def _set_window_icon(self):
+        """Title bar / taskbar icon. On Windows use a real multi-size .ico (crisp at 16 px);
+        it's generated fresh from icon.py on every start, so it always matches this build."""
+        self._icon_img = ImageTk.PhotoImage(make_icon("synced", 64))
+        if IS_WIN:
+            try:
+                path = os.path.join(data_dir(), "window.ico")
+                save_ico(path)
+                self.root.iconbitmap(default=path)
+                return
+            except Exception:
+                pass
+        self.root.iconphoto(True, self._icon_img)
 
     def px(self, n: float) -> int:
         return int(round(n * self.S))
@@ -357,6 +371,8 @@ class App:
         ttk.Separator(p).grid(row=5, column=0, sticky="ew", pady=px(12))
         ttk.Button(p, text="View activity log", command=self._activity_from_settings).grid(
             row=6, column=0, sticky="ew")
+        self.tint(ttk.Label(p, text=f"{APP} {VERSION}", style="Card.Muted.TLabel")).grid(
+            row=7, column=0, sticky="e", pady=(px(10), 0))
 
     def _activity_from_settings(self):
         self.hide_settings()

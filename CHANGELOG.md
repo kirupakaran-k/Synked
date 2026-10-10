@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 1.1 - Sharp window icon, version shown
+
+Window/taskbar icon generated as a proper multi-size icon; version number shown in settings.
+
 ## 1.0.8 - Same-height buttons, activity log in settings
 
 All buttons the same height, big bold + on Add folder pair, larger Theme label, activity log moved into settings.
