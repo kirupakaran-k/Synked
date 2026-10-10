@@ -33,14 +33,21 @@ if not defined PY (
 )
 
 rem ---------------------------------------------------------------- 1-2. Python and libraries
-echo [1/6] Preparing the build tools...
+echo [1/6] Preparing the build tools...   (started %TIME:~0,8%)
 if not exist "%ENV%\Scripts\python.exe" echo       First build on this PC: setting them up in "%ENV%"
 if not exist "%ENV%\Scripts\python.exe" %PY% -m venv "%ENV%" || goto :fail
 call "%ENV%\Scripts\activate.bat" || goto :fail
 
-echo [2/6] Installing libraries...
-python -m pip install --quiet --upgrade pip
-python -m pip install --quiet -r requirements.txt pyinstaller || goto :fail
+echo [2/6] Installing libraries...   (started %TIME:~0,8%)
+echo       The first time for version 3 this downloads Qt (about 100 MB). On a slow
+echo       connection that takes a while: the bars below show how far each download has got,
+echo       with its speed and time left. Libraries already downloaded are reused.
+python -m pip install --upgrade pip --progress-bar on --disable-pip-version-check --timeout 60 --retries 10
+rem Newer pip can pick up a broken download where it stopped instead of starting over.
+set "RESUME="
+python -m pip install --help 2>nul | find "--resume-retries" >nul && set "RESUME=--resume-retries 10"
+python -m pip install -r requirements.txt pyinstaller --progress-bar on --disable-pip-version-check --timeout 60 --retries 10 %RESUME% || goto :fail
+echo       Libraries ready.   (%TIME:~0,8%)
 
 set "VER="
 for /f "delims=" %%v in ('python -c "import version; print(version.VERSION)"') do set "VER=%%v"
@@ -52,7 +59,7 @@ set "OUT=%ROOT%\build %VER%"
 echo       SyncMate %VER% will be built into "%OUT%"
 
 rem ---------------------------------------------------------------- 3. close the running app
-echo [3/6] Closing SyncMate if it's running...
+echo [3/6] Closing SyncMate if it's running...   (%TIME:~0,8%)
 set "WASRUNNING="
 call :running && set "WASRUNNING=1"
 if not defined WASRUNNING goto :closed
@@ -69,7 +76,7 @@ taskkill /F /IM SyncMate.exe >nul 2>nul
 :closed
 
 rem ---------------------------------------------------------------- 4. clear old builds
-echo [4/6] Clearing out the old build and leftovers...
+echo [4/6] Clearing out the old build and leftovers...   (%TIME:~0,8%)
 rem Leftovers from older build scripts in this folder (tools, caches, old build output):
 if exist ".venv" rmdir /s /q ".venv"
 if exist "__pycache__" rmdir /s /q "__pycache__"
@@ -89,20 +96,22 @@ if exist "%OUT%" goto :fail
 mkdir "%OUT%" || goto :fail
 
 rem ---------------------------------------------------------------- 5-6. build
-echo [5/6] Drawing the icon...
+echo [5/6] Drawing the icon...   (%TIME:~0,8%)
 python icon.py "%OUT%\syncmate.ico" >nul || goto :fail
 
-echo [6/6] Building SyncMate.exe (takes a minute)...
-pyinstaller --noconfirm --clean --onefile --windowed --name SyncMate ^
-  --icon "%OUT%\syncmate.ico" ^
-  --distpath "%OUT%" --workpath "%OUT%\work" --specpath "%OUT%" ^
-  --collect-data sv_ttk ^
-  --collect-all tkinterdnd2 ^
-  --hidden-import pystray._win32 ^
-  --collect-submodules send2trash ^
-  --collect-submodules darkdetect ^
-  --collect-submodules watchdog.observers ^
-  "%HERE%\app.py" > "%OUT%\build.log" 2>&1 || goto :fail
+echo [6/6] Building SyncMate.exe (a minute or two)...   (started %TIME:~0,8%)
+echo       Each step is shown below and also saved to build.log. The last step (packing
+echo       everything into one .exe) is quiet for up to a minute; that's normal.
+set "PYI_ARGS=--noconfirm --clean --onefile --windowed --name SyncMate --collect-submodules send2trash --collect-submodules watchdog.observers --exclude-module tkinter"
+set "PYTHONUNBUFFERED=1"
+where powershell >nul 2>nul || goto :quietbuild
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& python -m PyInstaller $env:PYI_ARGS.Split(' ') --icon \"$env:OUT\syncmate.ico\" --distpath \"$env:OUT\" --workpath \"$env:OUT\work\" --specpath \"$env:OUT\" \"$env:HERE\app.py\" 2>&1 | ForEach-Object { \"$_\" } | Tee-Object -FilePath \"$env:OUT\build.log\" | ForEach-Object { '      ' + ($_ -replace '^[0-9]+ (INFO|WARNING): ', '') }; exit $LASTEXITCODE" || goto :fail
+goto :built
+:quietbuild
+rem (No PowerShell to show the steps live: just write them to build.log.)
+python -m PyInstaller %PYI_ARGS% --icon "%OUT%\syncmate.ico" --distpath "%OUT%" --workpath "%OUT%\work" --specpath "%OUT%" "%HERE%\app.py" > "%OUT%\build.log" 2>&1 || goto :fail
+:built
+echo       Packed.   (%TIME:~0,8%)
 if not exist "%OUT%\SyncMate.exe" goto :fail
 
 rem Keep the build folder tidy: just the app, its icon and the build log.

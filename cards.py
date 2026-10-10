@@ -1,707 +1,820 @@
-"""A sync-job card: shows status and live progress, and expands in place to edit.
+"""A folder-sync card: Main on top with a tree of its connected folders, live status
+and progress, and an editor that slides open below it like a curtain.
 
-A job has one Main folder and one or more connected folders; each connected folder
-has its own sync type and its own old-versions setting. The same card, blank, is used
-for adding a new folder sync.
+The same card, blank, is used for adding a new folder sync.
 """
 from __future__ import annotations
 
-import math
 import os
 import time
-import tkinter as tk
-import tkinter.font as tkfont
-from tkinter import filedialog, ttk
 
+from PySide6.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QProgressBar, QPushButton, QSizePolicy,
+                               QSlider, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+
+import theme
+from controls import EdgeLayout, FlowLayout, PathCombo, PathEdit, TreeLine
 from store import (KEEP_DAY_STOPS, KEEP_DAYS_HELP, MODE_HELP, MODE_LABELS, MODES,
                    OLD_FILES_HELP, OLD_FILES_LABELS, Member, nearest_stop, parse_days)
-from ui_common import (ONEDRIVE, PALETTE, STATE_COLOR, describe, elide, folder_name,
-                       open_folder, pretty_path, progress_detail)
-from widgets import FlowRow, ImageButton
+from ui_common import (ONEDRIVE, describe, elide, folder_name, open_folder, pretty_path,
+                       progress_detail)
 
 ARROW_KIND = {"two-way": "both", "mirror": "right", "update": "right", "collect": "left"}
-SHORT_MODE = {"two-way": "Two-way", "mirror": "Mirror", "update": "Update",
-              "collect": "Collect"}
-
-
+SHORT_MODE = {"two-way": "Two-way", "mirror": "Mirror", "update": "Update", "collect": "Collect"}
 BOX_HINT = ("Type a folder path, use Browse, or drag a folder here from File Explorer. "
             "A folder that doesn't exist yet is created.")
-
-
-def set_if_changed(widget, **options) -> None:
-    """configure() only the options whose value is different."""
-    changed = {}
-    for k, v in options.items():
-        try:
-            same = str(widget.cget(k)) == str(v)
-        except tk.TclError:
-            same = False
-        if not same:
-            changed[k] = v
-    if changed:
-        widget.configure(**changed)
-
-
-def _px(value) -> int:
-    try:
-        return int(float(str(value) or 0))
-    except ValueError:
-        return 0
-
-
-def chars_for(widget, text: str) -> int:
-    """Width (in Tk's character units) a ttk entry/dropdown needs to show `text` in full."""
-    try:
-        f = tkfont.nametofont(str(widget.cget("font")) or "TkTextFont")
-    except tk.TclError:
-        f = tkfont.nametofont("TkTextFont")
-    return math.ceil((f.measure(text) + 2) / f.measure("0"))
+QWIDGETSIZE_MAX = 16777215
 
 
 def same_path(a: str, b: str) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
-class JobCard:
-    def __init__(self, app, parent, row: int, job=None):
-        self.app, self.job = app, job
+def label(text: str = "", role: str | None = None, wrap: bool = False) -> QLabel:
+    lab = QLabel(text)
+    if role:
+        lab.setProperty("role", role)
+    if wrap:
+        lab.setWordWrap(True)
+    lab.setTextInteractionFlags(Qt.NoTextInteraction)
+    return lab
+
+
+def button(text: str, kind: str | None = None, tip: str | None = None) -> QPushButton:
+    b = QPushButton(text)
+    if kind:
+        b.setProperty("kind", kind)
+    if tip:
+        b.setToolTip(tip)
+    b.setCursor(Qt.PointingHandCursor)
+    return b
+
+
+def set_text(lab: QLabel, text: str) -> None:
+    if lab.text() != text:
+        lab.setText(text)
+
+
+# ============================================================================ drawer
+class Drawer(QWidget):
+    """Holds the editor and reveals it like a curtain: the editor always keeps its full
+    size and the drawer's height grows from 0 (or shrinks back), clipping it."""
+
+    OPEN_MS, CLOSE_MS = 280, 220
+
+    def __init__(self, content: QWidget, parent=None):
+        super().__init__(parent)
+        self.content = content
+        content.setParent(self)
+        content.installEventFilter(self)
+        self.opened = False
+        self.setMaximumHeight(0)
+        self.setVisible(False)
+        sp = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        sp.setHeightForWidth(True)          # its height depends on the width (rows wrap)
+        self.setSizePolicy(sp)
+        # Each step sets the drawer's height AND the card's height together, so the card
+        # grows/shrinks by exactly the part being revealed: nothing else moves or stretches.
+        self.anim = QVariantAnimation(self)
+        self.anim.valueChanged.connect(self._step)
+        self.anim.finished.connect(self._done)
+        self._then = None
+        self._base = 0
+
+    # its natural height is the editor's height at this width
+    def full_height(self, w: int | None = None) -> int:
+        w = self.width() if w is None else w
+        c = self.content
+        return c.heightForWidth(w) if c.hasHeightForWidth() else c.sizeHint().height()
+
+    def hasHeightForWidth(self):              # noqa: N802
+        return True
+
+    def heightForWidth(self, w):              # noqa: N802
+        # while sliding, ask only for the part that's showing; otherwise the card would
+        # hand the rest of the space to its header and stretch it
+        return min(self.full_height(w), self.maximumHeight())
+
+    def sizeHint(self):                       # noqa: N802
+        return QSize(self.content.sizeHint().width(),
+                     min(self.full_height(), self.maximumHeight()))
+
+    def minimumSizeHint(self):                # noqa: N802
+        return QSize(0, 0)
+
+    def resizeEvent(self, e):                 # noqa: N802
+        self.content.setGeometry(0, 0, self.width(), self.full_height())
+
+    def eventFilter(self, obj, e):            # noqa: N802
+        if obj is self.content and e.type() == QEvent.LayoutRequest:
+            self.updateGeometry()
+            self.content.setGeometry(0, 0, self.width(), self.full_height())
+        return False
+
+    def _card(self) -> QWidget:
+        return self.parentWidget()
+
+    def _step(self, v):
+        v = int(v)
+        self.setMaximumHeight(v)
+        self._card().setFixedHeight(self._base + v)
+
+    def _release(self):
+        card = self._card()
+        card.setMinimumHeight(0)
+        card.setMaximumHeight(QWIDGETSIZE_MAX)
+
+    def open(self, animate: bool = True):
+        self._then = None
+        self.opened = True
+        self.anim.stop()
+        start = self.height() if self.isVisible() else 0
+        self.setMaximumHeight(start)
+        self.setVisible(True)
+        # A card that was only just made (like "New folder sync") has no real size yet:
+        # lay the list out now, so it starts from its true height, not Qt's default.
+        card = self._card()
+        if not card.isVisible() or card.height() > card.heightForWidth(card.width()) + 1:
+            if card.isHidden():
+                card.setVisible(True)        # Qt would show it a moment later anyway
+            card.setMinimumHeight(0)
+            card.setMaximumHeight(QWIDGETSIZE_MAX)
+            holder = card.parentWidget()
+            if holder is not None and holder.layout() is not None:
+                holder.layout().activate()
+        self._base = card.height() - start
+        m = self._card().layout().contentsMargins()
+        target = self.full_height(self._card().width() - m.left() - m.right())
+        if not animate:
+            self._release()
+            self.setMaximumHeight(QWIDGETSIZE_MAX)
+            return
+        self._step(start)
+        self.anim.setDuration(self.OPEN_MS)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)     # fast start, gentle stop
+        self.anim.setStartValue(start)
+        self.anim.setEndValue(max(target, 1))
+        self.anim.start()
+
+    def close(self, then=None, animate: bool = True):
+        self._then = then
+        self.opened = False
+        self.anim.stop()
+        if not self.isVisible() or not animate:
+            self._release()
+            self.setMaximumHeight(0)
+            self.setVisible(False)
+            self._finish_then()
+            return
+        self._base = self._card().height() - self.height()
+        self._step(self.height())
+        self.anim.setDuration(self.CLOSE_MS)
+        self.anim.setEasingCurve(QEasingCurve.InOutCubic)
+        self.anim.setStartValue(self.height())
+        self.anim.setEndValue(0)
+        self.anim.start()
+
+    def _finish_then(self):
+        then, self._then = self._then, None
+        if then:
+            then()
+
+    def _done(self):
+        if self.opened:
+            self.setMaximumHeight(QWIDGETSIZE_MAX)   # from now on it simply fits its content
+            self._release()
+        else:
+            self.setVisible(False)
+            self._release()
+            self._finish_then()
+
+
+# ============================================================================ folder row
+class FolderRow(QWidget):
+    """One connected folder in the editor: its path, sync type and old-files setting."""
+
+    remove_requested = Signal(object)
+    submit = Signal()
+    escape = Signal()
+
+    def __init__(self, card: "JobCard", member: Member | None = None):
+        super().__init__()
+        self.card = card
+        self.id = member.id if member else None
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self.path = PathCombo()
+        self.path.setToolTip(BOX_HINT)
+        self.path.on_drop = lambda paths: card.on_drop(self, paths)
+        self.path.lineEdit().returnPressed.connect(self.submit)
+        top.addWidget(self.path, 1)
+        b = button("Browse")
+        b.clicked.connect(lambda: card.browse(self.path, "folder"))
+        top.addWidget(b)
+        b = button("Open")
+        b.clicked.connect(lambda: card.open_path(self.path.text()))
+        top.addWidget(b)
+        self.remove = button("", "remove", "Remove this folder from the sync (its files stay "
+                                            "where they are)")
+        self.remove.clicked.connect(lambda: self.remove_requested.emit(self))
+        top.addWidget(self.remove)
+        v.addLayout(top)
+
+        opts = QWidget()
+        flow = FlowLayout(opts, 8, 6)
+        self.mode = QComboBox()
+        for i, m in enumerate(MODES):
+            self.mode.addItem(MODE_LABELS[m], m)
+            self.mode.setItemData(i, MODE_HELP[m], Qt.ToolTipRole)
+        self.mode.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.mode.currentIndexChanged.connect(self._mode_tip)
+        flow.addWidget(self.mode)
+
+        self.old = QComboBox()
+        for i, keep in enumerate((False, True)):
+            self.old.addItem(OLD_FILES_LABELS[keep], keep)
+            self.old.setItemData(i, OLD_FILES_HELP[keep], Qt.ToolTipRole)
+        self.old.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.old.currentIndexChanged.connect(self._old_changed)
+        flow.addWidget(self.old)
+
+        # "for [slider] [30] days": slide, or type any number of days ("forever" = keep)
+        self.days = QWidget()
+        d = QHBoxLayout(self.days)
+        d.setContentsMargins(4, 0, 0, 0)
+        d.setSpacing(10)
+        self.for_label = label("for")
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(0, len(KEEP_DAY_STOPS) - 1)
+        self.slider.setFixedWidth(120)
+        self.slider.setPageStep(1)
+        self.slider.setCursor(Qt.PointingHandCursor)
+        self.days_box = QLineEdit()
+        self.days_box.setAlignment(Qt.AlignCenter)
+        self.days_box.setFixedWidth(76)
+        self.unit = label("days")
+        for w in (self.for_label, self.slider, self.days_box, self.unit):
+            w.setToolTip(KEEP_DAYS_HELP)
+            d.addWidget(w)
+        d.addStretch(0)
+        flow.addWidget(self.days)
+        v.addWidget(opts)
+
+        self.keep_days = 30
+        self.slider.valueChanged.connect(self._slid)
+        self.days_box.textEdited.connect(self._typed)
+        self.days_box.editingFinished.connect(self.settle)
+        self.days_box.returnPressed.connect(self.submit)
+        self.retheme()
+        self.load(member)
+
+    # ---- values
+    def load(self, member: Member | None):
+        self.id = member.id if member else self.id
+        self.path.setText(member.path if member else "")
+        mode = member.mode if member else "two-way"
+        self.mode.setCurrentIndex(MODES.index(mode))
+        self.old.setCurrentIndex(1 if member and member.versions else 0)
+        self.keep_days = max(0, member.keep_days) if member else 30
+        self._show_days()
+        self._mode_tip()
+        self._old_changed()
+
+    def value(self) -> Member | None:
+        path = self.path.text().strip().strip('"')
+        if not path:
+            return None
+        self.settle()
+        return Member(path=path, mode=self.mode.currentData(), versions=bool(self.old.currentData()),
+                      keep_days=self.keep_days, **({"id": self.id} if self.id else {}))
+
+    # ---- behaviour
+    def _mode_tip(self, *_):
+        self.mode.setToolTip(MODE_HELP[self.mode.currentData()])
+
+    def _old_changed(self, *_):
+        keep = bool(self.old.currentData())
+        self.old.setToolTip(OLD_FILES_HELP[keep])
+        self.days.setVisible(keep)
+
+    def _show_days(self):
+        n = self.keep_days
+        self.slider.blockSignals(True)
+        self.slider.setValue(nearest_stop(n))
+        self.slider.blockSignals(False)
+        self.days_box.setText("forever" if n == 0 else str(n))
+        self._unit()
+
+    def _unit(self):
+        n = self.keep_days
+        self.unit.setVisible(n != 0)
+        self.unit.setText("day" if n == 1 else "days")
+
+    def _slid(self, i: int):
+        self.keep_days = KEEP_DAY_STOPS[i]          # far right is "forever"
+        self.days_box.setText("forever" if self.keep_days == 0 else str(self.keep_days))
+        self._unit()
+
+    def _typed(self, text: str):
+        n = parse_days(text)
+        if n is not None:
+            self.keep_days = n
+            self.slider.blockSignals(True)
+            self.slider.setValue(nearest_stop(n))
+            self.slider.blockSignals(False)
+            self._unit()
+
+    def settle(self):
+        """Tidy what was typed, or put back the last good value."""
+        self._show_days()
+
+    def set_suggestions(self, items):
+        self.path.set_suggestions(items)
+
+    def retheme(self):
+        self.remove.setIcon(theme.cross_icon("#FFFFFF", 14))
+        self.remove.setIconSize(QSize(14, 14))
+
+
+# ============================================================================ card
+class Header(QWidget):
+    """The always-visible top part of a card; clicking it opens or closes the card.
+    It always keeps exactly its own height (never stretched or squeezed while the
+    editor below it slides)."""
+    clicked = Signal()
+
+    def _own_height(self) -> int:
+        lay = self.layout()
+        return lay.totalHeightForWidth(self.width()) if lay and lay.hasHeightForWidth() \
+            else lay.totalSizeHint().height()
+
+    def minimumSizeHint(self):                # noqa: N802
+        return QSize(0, self._own_height())
+
+    def sizeHint(self):                       # noqa: N802
+        return QSize(super().sizeHint().width(), self._own_height())
+
+    def mousePressEvent(self, e):             # noqa: N802
+        if e.button() == Qt.LeftButton:
+            self.clicked.emit()
+
+
+class JobCard(QFrame):
+    def __init__(self, win, job=None):
+        super().__init__()
+        self.win, self.job = win, job
         self.is_new = job is None
         self.key = "new" if self.is_new else job.id
-        px, bg = app.px, app.card_bg
-        self.rows: list = []        # connected-folder rows in the editor
+        self.setObjectName("card")
+        self.setProperty("open", False)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        self.rows: list[FolderRow] = []
+        self.badges: list = []
         self._activity_sig = None
-        self._rows_for = None       # which job version the editor rows were filled from
+        self._state = {}
 
-        f = self.frame = ttk.Frame(parent, style="Card.TFrame", padding=(px(16), px(12)))
-        f.grid(row=row, column=0, sticky="ew", pady=(0, px(10)))
-        f.columnconfigure(1, weight=1)
-        self._click = []  # widgets that toggle the card when clicked
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(16, 12, 16, 12)
+        outer.setSpacing(0)
 
-        # ---- header: Main on top, each connected folder below it ----------------
-        #   ●  Language                                   ⋮
-        #      Main · D:\KK
-        #      [⇅]  Language
-        #           Two-way · OneDrive
-        #      [↓]  New folder
-        #           Update · D:\
-        self.dot = tk.Canvas(f, width=px(10), height=px(10), highlightthickness=0, background=bg)
-        self.dot.create_oval(1, 1, px(10) - 1, px(10) - 1, tags="dot")
-        self.dot.grid(row=0, column=0, sticky="nw", padx=(0, px(12)), pady=(px(5), 0))
-        self.badges = []            # (label, mode) for each connected folder
+        # ---- header -----------------------------------------------------------
+        head = self.header = Header()
+        hp = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        hp.setHeightForWidth(True)            # its own height, never stretched or squeezed
+        head.setSizePolicy(hp)
+        head.setCursor(Qt.PointingHandCursor if not self.is_new else Qt.ArrowCursor)
+        head.clicked.connect(self.toggle)
+        g = QGridLayout(head)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setHorizontalSpacing(12)
+        g.setVerticalSpacing(0)
+        g.setColumnStretch(1, 1)
+        self.dot = QLabel()
+        self.dot.setFixedSize(10, 16)
+        self.dot.setAlignment(Qt.AlignCenter)
+        g.addWidget(self.dot, 0, 0, Qt.AlignTop)
+
+        body = QVBoxLayout()
+        body.setSpacing(0)
+        body.setContentsMargins(0, 0, 0, 0)
         if self.is_new:
-            box = tk.Frame(f, background=bg)
-            box.grid(row=0, column=1, sticky="ew")
-            ttk.Label(box, text="New folder sync", style="Card.Name.TLabel").pack(anchor="w")
-            sub = app.tint(ttk.Label(box, text="Choose a Main folder and the folders to keep in "
-                                               "sync with it", style="Card.Muted.TLabel"))
-            sub.pack(anchor="w")
-            box.bind("<Configure>", lambda e: e.width > 50 and _px(sub.cget("wraplength")) != e.width
-                     and sub.configure(wraplength=e.width), add="+")
+            body.addWidget(label("New folder sync", "name"))
+            body.addWidget(label("Choose a Main folder and the folders to keep in sync with it",
+                                 "muted", wrap=True))
         else:
-            head = self.head = tk.Frame(f, background=bg)
-            head.grid(row=0, column=1, sticky="ew")
-            head.columnconfigure(2, weight=1)
-            self._text_block(head, 0, 0, folder_name(job.main),
-                             "Main · " + elide(pretty_path(os.path.dirname(job.main)) or job.main, 60),
-                             columnspan=3)
-            # a tree: a line runs down from Main and branches off to each connected folder
-            self.branches = []
-            for i, m in enumerate(job.members, start=1):
-                branch = tk.Canvas(head, width=px(26), height=1, background=bg,
-                                   highlightthickness=0, borderwidth=0)
-                branch.grid(row=i, column=0, sticky="ns")
-                badge = tk.Label(head, background=bg, borderwidth=0, padx=0, pady=0)
-                badge.grid(row=i, column=1, sticky="w", pady=(px(8), 0), padx=(0, px(12)))
-                self.badges.append((badge, m.mode))
-                self.branches.append((branch, badge, i == len(job.members)))
-                self._text_block(head, i, 2, folder_name(m.path),
-                                 f"{SHORT_MODE[m.mode]} · "
-                                 + elide(pretty_path(os.path.dirname(m.path)) or m.path, 56),
-                                 pady=(px(8), 0))
-                self._click += [badge, branch]
-                branch.bind("<Configure>", lambda e: self._draw_tree(), add="+")
-            self._click += [head, f, self.dot]
-            # the ⋮ "more" button: just the icon, no box (a soft highlight on hover)
-            self.more = tk.Label(f, image=app._dots_img, background=bg, cursor="hand2",
-                                 padx=px(8), pady=px(6), borderwidth=0)
-            self.more.grid(row=0, column=2, sticky="ne", padx=(px(10), 0))
-            self.more.bind("<Button-1>", lambda e: self.toggle())
-            self.more.bind("<Enter>", lambda e: self.more.configure(
-                background=PALETTE[self.app.theme]["track"]))
-            self.more.bind("<Leave>", lambda e: self.more.configure(background=self.bg))
+            body.addWidget(label(folder_name(job.main), "name"))
+            body.addWidget(label("Main · " + elide(pretty_path(os.path.dirname(job.main))
+                                                   or job.main, 60), "muted"))
+            # the tree: a line comes down from Main and branches off to each folder
+            for i, m in enumerate(job.members):
+                body.addWidget(self._branch(m, last=i == len(job.members) - 1))
+            self.status = label("", "muted", wrap=True)
+            self.status.setContentsMargins(0, 10, 0, 0)
+            body.addWidget(self.status)
+            self.bar = QProgressBar()
+            self.bar.setRange(0, 1000)
+            self.bar.setTextVisible(False)
+            self.bar.setVisible(False)
+            body.addSpacing(2)
+            body.addWidget(self.bar)
+            self.detail = label("", "faint", wrap=True)
+            self.detail.setVisible(False)
+            body.addWidget(self.detail)
+            # "folder suddenly empty" choices
+            self.fix = QWidget()
+            fx = QHBoxLayout(self.fix)
+            fx.setContentsMargins(0, 8, 0, 0)
+            fx.setSpacing(8)
+            b = button("Restore files", "primary")
+            b.clicked.connect(lambda: win.ctrl.resolve_empty(self.job.id, False))
+            fx.addWidget(b)
+            b = button("Apply the deletion")
+            b.clicked.connect(lambda: win.confirm_delete(self.job.id))
+            fx.addWidget(b)
+            fx.addStretch(1)
+            self.fix.setVisible(False)
+            body.addWidget(self.fix)
+        g.addLayout(body, 0, 1)
+        if not self.is_new:
+            self.more = QToolButton()
+            self.more.setObjectName("more")
+            self.more.setIconSize(QSize(20, 20))
+            self.more.setCursor(Qt.PointingHandCursor)
+            self.more.setToolTip("Open this folder sync to change it")
+            self.more.clicked.connect(self.toggle)
+            g.addWidget(self.more, 0, 2, Qt.AlignTop)
+        outer.addWidget(head)
+
+        # ---- editor, in a drawer that opens like a curtain ------------------------
+        self.editor = self._build_editor()
+        self.drawer = Drawer(self.editor)
+        self.drawer.anim.valueChanged.connect(lambda _: self.win.keep_visible(self))
+        outer.addWidget(self.drawer)
         self.retheme()
 
-        # ---- status, live progress -----------------------------------------
-        if not self.is_new:
-            self.status = app.tint(ttk.Label(f, text="", style="Card.Muted.TLabel"))
-            self.status.grid(row=1, column=1, sticky="w", pady=(px(10), 0))
-            self.bar = ttk.Progressbar(f, mode="determinate", maximum=1000)
-            self.bar.grid(row=2, column=1, sticky="ew", pady=(px(6), 0))
-            self.detail = app.tint(ttk.Label(f, text="", style="Card.Muted.TLabel"))
-            self.detail.grid(row=3, column=1, sticky="w", pady=(px(3), 0))
-            self.bar.grid_remove()
-            self.detail.grid_remove()
-            self._bar_shown = False
-            self._click += [self.status, self.detail]
-            f.bind("<Configure>", lambda e: self._wrap_status(), add="+")
-
-            # "folder suddenly empty" choices
-            self.fix = tk.Frame(f, background=bg)
-            self.fix.grid(row=4, column=1, sticky="w", pady=(px(8), 0))
-            ttk.Button(self.fix, text="Restore files", style="Accent.TButton",
-                       command=lambda: app.ctrl.resolve_empty(job.id, False)).pack(
-                side="left", padx=(0, px(8)))
-            self.fix_delete = ttk.Button(self.fix, text="Apply the deletion",
-                                         command=lambda: app.confirm_delete(job.id))
-            self.fix_delete.pack(side="left")
-            self.fix.grid_remove()
-
-        for w in self._click:
-            w.bind("<Button-1>", lambda e: self.toggle(), add="+")
-            try:
-                w.configure(cursor="hand2")
-            except tk.TclError:
-                pass
-
-        self._build_editor()
-
-    def _wrap_status(self) -> None:
-        """Long status lines wrap inside the card instead of running off its edge."""
-        try:
-            width = self.frame.grid_bbox(1, 0, 1, 0)[2]
-        except (tk.TclError, IndexError):
-            return
-        if width > 50:
-            for lab in (self.status, self.detail):
-                if _px(lab.cget("wraplength")) != width:
-                    lab.configure(wraplength=width)
-
-    @property
-    def bg(self) -> str:
-        return self.app.card_bg
-
-    def retheme(self) -> None:
-        """Swap in the current theme's icons (colours are handled by the app)."""
-        if self.is_new:
-            c = PALETTE[self.app.theme]["thumb"]
-            self.dot.itemconfigure("dot", fill=c, outline=c)
-            return
-        self.more.configure(image=self.app._dots_img)
-        for badge, mode in self.badges:
-            badge.configure(image=self.app._badge_imgs[ARROW_KIND[mode]])
-        self._draw_tree()
-
-    def _draw_tree(self) -> None:
-        """The tree lines: down from Main, with a rounded branch to each folder's badge."""
-        if not getattr(self, "branches", None):
-            return
-        px = self.app.px
-        color = PALETTE[self.app.theme]["line"]
-        lw = max(1, round(px(1.6)))
-        x, r = px(7), px(7)                           # the trunk, and the corner's radius
-        try:
-            for canvas, badge, last in self.branches:
-                canvas.delete("all")
-                w, h = canvas.winfo_width(), canvas.winfo_height()
-                mid = badge.winfo_y() - canvas.winfo_y() + badge.winfo_height() / 2
-                if h <= 1 or mid <= r:
-                    continue
-                canvas.create_line(x, 0, x, mid - r, fill=color, width=lw)
-                canvas.create_arc(x, mid - 2 * r, x + 2 * r, mid, start=180, extent=90,
-                                  style="arc", outline=color, width=lw)
-                canvas.create_line(x + r, mid, w, mid, fill=color, width=lw)
-                if not last:                          # the trunk carries on to the next one
-                    canvas.create_line(x, mid - r, x, h, fill=color, width=lw)
-        except tk.TclError:
-            pass
-
-    def _text_block(self, parent, row, col, title, sub, columnspan=1, pady=0):
-        box = tk.Frame(parent, background=self.bg)
-        box.grid(row=row, column=col, columnspan=columnspan, sticky="w", pady=pady)
-        a = ttk.Label(box, text=title, style="Card.Name.TLabel")
-        a.pack(anchor="w")
-        b = self.app.tint(ttk.Label(box, text=sub, style="Card.Muted.TLabel"))
-        b.pack(anchor="w")
-        self._click += [box, a, b]
-
-    # ======================================================================= editor
-    def _build_editor(self):
-        app, px, bg = self.app, self.app.px, self.bg
-        # The editor opens like a curtain: it sits in a "curtain" frame whose height is
-        # animated from 0 to the editor's full height (and back when closing).
-        self.curtain = tk.Frame(self.frame, background=bg, height=1)
-        self.curtain.grid(row=5, column=0, columnspan=3, sticky="ew")
-        self.curtain.pack_propagate(False)
-        self.curtain.grid_remove()
-        self._curtain_job = None
-        self.opened = False
-        ed = self.editor = tk.Frame(self.frame, background=bg)
-        ed.columnconfigure(0, weight=1)
-        ttk.Separator(ed).grid(row=0, column=0, sticky="ew", pady=(px(12), px(12)))
-
-        # Main folder
-        self._section(ed, 1, "Main folder", "the master copy")
-        mrow = FlowRow(ed, bg=bg, gap=px(8), vgap=px(6))
-        mrow.grid(row=2, column=0, sticky="ew")
-        self.main = tk.StringVar()
-        self.main_box = mrow.add(ttk.Entry(mrow, textvariable=self.main),
-                                 stretch=True, min_width=px(240), sticky="ew")
-        btns = tk.Frame(mrow, background=bg)
-        ttk.Button(btns, text="Browse", command=lambda: self._browse(self.main, "Main folder")
-                   ).pack(side="left")
-        ttk.Button(btns, text="Open", command=lambda: self._open(self.main.get())).pack(
-            side="left", padx=(px(8), 0))
-        mrow.add(btns)
-        app.tooltip.attach(self.main_box, lambda: BOX_HINT)
-        app.drop_target(self.main_box, lambda paths: self.on_drop(None, paths),
-                        lambda over: self.main_box.state(["focus"] if over else ["!focus"]))
-        self.main.trace_add("write", lambda *_: self._suggest())
-
-        # Connected folders
-        self._section(ed, 3, "Connected folders", "each one syncs with Main its own way",
-                      pady=(px(14), px(4)))
-        self.rows_frame = tk.Frame(ed, background=bg)
-        self.rows_frame.grid(row=4, column=0, sticky="ew")
-        self.rows_frame.columnconfigure(0, weight=1)
-        add_row = tk.Frame(ed, background=bg)
-        add_row.grid(row=5, column=0, sticky="w", pady=(px(8), 0))
-        ttk.Button(add_row, text="＋ Add folder", command=lambda: self._add_row(focus=True)).pack(
-            side="left")
-
-        # Recent activity (existing jobs)
-        if not self.is_new:
-            self._section(ed, 7, "Recent activity", "", pady=(px(14), px(4)))
-            self.activity = tk.Frame(ed, background=bg)
-            self.activity.grid(row=8, column=0, sticky="ew")
-            self.activity.columnconfigure(1, weight=1)
-            self._activity_msgs = []
-            self.activity.bind("<Configure>", lambda e: self._wrap_activity(), add="+")
-
-        self.err = app.tint(ttk.Label(ed, text="", style="Card.Error.TLabel"), "error")
-        self.err.grid(row=9, column=0, sticky="w", pady=(px(6), 0))
-
-        # actions (left: pause / sync now; right: remove / cancel / apply)
-        self.actions = act = FlowRow(ed, bg=bg, gap=px(8), vgap=px(8))
-        act.grid(row=10, column=0, sticky="ew", pady=(px(10), 0))
-        if not self.is_new:
-            left = tk.Frame(act, background=bg)
-            self.pause_btn = ttk.Button(left, text="Pause", command=self._toggle_pause)
-            self.pause_btn.pack(side="left", padx=(0, px(8)))
-            self.sync_btn = ttk.Button(left, text="Sync now",
-                                       command=lambda: app.ctrl.sync_now(self.job.id))
-            self.sync_btn.pack(side="left")
-            act.add(left)
-        right = tk.Frame(act, background=bg)
-        if not self.is_new:
-            ttk.Button(right, text="Remove", command=self._ask_remove).pack(
-                side="left", padx=(0, px(8)))
-        ttk.Button(right, text="Cancel", command=self.cancel).pack(side="left", padx=(0, px(8)))
-        ttk.Button(right, text="Start syncing" if self.is_new else "Apply",
-                   style="Accent.TButton", command=self.apply).pack(side="left")
-        act.add(right, stretch=True, sticky="e")
-
-        # inline "are you sure?" for Remove
-        self.confirm = cf = FlowRow(ed, bg=bg, gap=px(8), vgap=px(8))
-        cf.grid(row=10, column=0, sticky="ew", pady=(px(10), 0))
-        cf.add(app.tint(ttk.Label(cf, text="Stop this folder sync? Your files stay where they are.",
-                                  style="Card.Body.TLabel"), "fg"))
-        sure = tk.Frame(cf, background=bg)
-        ttk.Button(sure, text="Keep syncing", command=self._hide_confirm).pack(
-            side="left", padx=(0, px(8)))
-        ttk.Button(sure, text="Stop syncing", style="Accent.TButton",
-                   command=self._remove).pack(side="left")
-        cf.add(sure, stretch=True, sticky="e")
-        cf.grid_remove()
-
-        self.main_box.bind("<Return>", lambda e: self.apply())
-        self.main_box.bind("<Escape>", lambda e: self.cancel())
-
-    def _section(self, ed, row, title, hint, pady=(0, 4)):
-        top = FlowRow(ed, bg=self.bg, gap=self.app.px(10), vgap=0)
-        top.grid(row=row, column=0, sticky="ew", pady=pady)
-        top.add(ttk.Label(top, text=title, style="Card.Name.TLabel"), sticky="sw")
-        if hint:
-            top.add(self.app.tint(ttk.Label(top, text=hint, style="Card.Muted.TLabel")),
-                    sticky="sw")
-
-    # ---- connected-folder rows -------------------------------------------------
-    def _add_row(self, member: Member | None = None, focus=False) -> dict:
-        app, px, bg = self.app, self.app.px, self.bg
-        fr = tk.Frame(self.rows_frame, background=bg)
-        fr.grid(row=len(self.rows), column=0, sticky="ew", pady=(0 if not self.rows else px(10), 0))
-        fr.columnconfigure(0, weight=1)
-        keep = bool(member and member.versions)
-        days0 = member.keep_days if member else 30
-        row = {"frame": fr, "id": member.id if member else None,
-               "path": tk.StringVar(value=member.path if member else ""),
-               "mode": tk.StringVar(value=MODE_LABELS[member.mode if member else "two-way"]),
-               "versions": tk.StringVar(value=OLD_FILES_LABELS[keep]),
-               "keep_days": max(0, days0),
-               "pos": tk.DoubleVar(value=nearest_stop(days0)),
-               "days_text": tk.StringVar()}
-
-        # [folder path ..............] [Browse] [Open] [✕]
-        top = FlowRow(fr, bg=bg, gap=px(8), vgap=px(6))
-        top.grid(row=0, column=0, sticky="ew")
-        box = top.add(ttk.Combobox(top, textvariable=row["path"], values=self._suggestions()),
-                      stretch=True, min_width=px(240), sticky="ew")
-        row["box"] = box
-        btns = tk.Frame(top, background=bg)
-        ttk.Button(btns, text="Browse", command=lambda: self._browse(row["path"], "folder")).pack(
-            side="left")
-        ttk.Button(btns, text="Open", command=lambda: self._open(row["path"].get())).pack(
-            side="left", padx=(px(8), 0))
-        remove = ImageButton(btns, app._remove_imgs, lambda: self._remove_row(row), bg=bg)
-        remove.pack(side="left", padx=(px(8), 0))
-        app.tooltip.attach(remove, lambda: "Remove this folder from the sync "
-                                           "(its files stay where they are)")
-        row["remove"] = remove
-        top.add(btns)
-
-        # [Two-way ▾] [Keep old versions ▾] for [slider] [30] days
-        opts = FlowRow(fr, bg=bg, gap=px(8), vgap=px(6))
-        opts.grid(row=1, column=0, sticky="ew", pady=(px(6), 0))
-        mode_box = opts.add(ttk.Combobox(opts, textvariable=row["mode"], state="readonly",
-                                         values=[MODE_LABELS[m] for m in MODES]))
-        old_box = opts.add(ttk.Combobox(opts, textvariable=row["versions"], state="readonly",
-                                        values=[OLD_FILES_LABELS[False], OLD_FILES_LABELS[True]]))
-        days = tk.Frame(opts, background=bg)
-        for_label = app.tint(ttk.Label(days, text="for", style="Card.Body.TLabel"), "fg")
-        for_label.pack(side="left", padx=(px(2), 0))
-        last = len(KEEP_DAY_STOPS) - 1
-        slider = ttk.Scale(days, from_=0, to=last, orient="horizontal", length=px(110),
-                           variable=row["pos"])
-        slider.pack(side="left", padx=(px(10), px(10)))
-        days_entry = ttk.Entry(days, textvariable=row["days_text"], justify="center")
-        days_entry.configure(width=chars_for(days_entry, "forever"))
-        days_entry.pack(side="left")
-        unit = app.tint(ttk.Label(days, text="days", style="Card.Body.TLabel"), "fg")
-        opts.add(days, visible=keep)
-        row.update(days=days, mode_box=mode_box, old_box=old_box, slider=slider,
-                   days_entry=days_entry, opts=opts)
-
-        def show_days(n):
-            """Put n days (0 = forever) in the text box; the unit hides for 'forever'."""
-            row["days_text"].set("forever" if n == 0 else str(n))
-            if n == 0:
-                unit.pack_forget()
-            else:
-                unit.configure(text="day" if n == 1 else "days")
-                unit.pack(side="left", padx=(px(6), 0))
-            opts.relayout()
-
-        def on_slide(v):
-            # dragging: snap to the nearest stop; the far right is "forever"
-            n = KEEP_DAY_STOPS[int(round(float(v)))]
-            if n != row["keep_days"]:
-                row["keep_days"] = n
-                show_days(n)
-        slider.configure(command=on_slide)
-        slider.bind("<ButtonRelease-1>",
-                    lambda e: row["pos"].set(round(row["pos"].get())), add="+")
-
-        def typed(*_):
-            """Typing a number keeps it exactly and moves the slider to the closest stop."""
-            n = parse_days(row["days_text"].get())
-            if n is not None and n != row["keep_days"]:
-                row["keep_days"] = n
-                row["pos"].set(nearest_stop(n))
-                if n == 0:
-                    unit.pack_forget()
-                else:
-                    unit.configure(text="day" if n == 1 else "days")
-                    unit.pack(side="left", padx=(px(6), 0))
-        row["days_text"].trace_add("write", typed)
-
-        def settle(_=None):
-            show_days(row["keep_days"])     # tidy what was typed, or undo a bad entry
-        row["settle"] = settle
-        days_entry.bind("<FocusOut>", settle, add="+")
-        days_entry.bind("<Return>", lambda e: (settle(), self.apply()))
-        days_entry.bind("<Escape>", lambda e: self.cancel())
-        show_days(row["keep_days"])
-
-        def fit_width(box, text):
-            """Size a dropdown to its current text (the arrow's room is added by Tk)."""
-            box.configure(width=max(4, chars_for(box, text)))
-            opts.relayout()
-
-        def on_old_files(*_):
-            fit_width(old_box, row["versions"].get())
-            opts.set_visible(days, row["versions"].get() == OLD_FILES_LABELS[True])
-        row["versions"].trace_add("write", on_old_files)
-        on_old_files()
-        row["mode"].trace_add("write", lambda *_: fit_width(mode_box, row["mode"].get()))
-        fit_width(mode_box, row["mode"].get())
-
-        # hover hints: on each choice in the open lists, and on the closed boxes
-        mode_of = {v: k for k, v in MODE_LABELS.items()}
-        tip = app.tooltip
-        tip.attach(mode_box, lambda: MODE_HELP[mode_of.get(row["mode"].get(), "two-way")])
-        tip.attach_list(mode_box, lambda i: MODE_HELP[MODES[i]] if 0 <= i < len(MODES) else "")
-        tip.attach(old_box, lambda: OLD_FILES_HELP[row["versions"].get() == OLD_FILES_LABELS[True]])
-        tip.attach_list(old_box, lambda i: OLD_FILES_HELP.get(bool(i), "") if i in (0, 1) else "")
-        for w in (slider, days_entry, for_label, unit):
-            tip.attach(w, lambda: KEEP_DAYS_HELP)
-        tip.attach(box, lambda: BOX_HINT)
-        app.drop_target(box, lambda paths: self.on_drop(row, paths),
-                        lambda over: box.state(["focus"] if over else ["!focus"]))
-        box.bind("<Return>", lambda e: self.apply())
-        box.bind("<Escape>", lambda e: self.cancel())
-        self.rows.append(row)
-        if focus:
-            box.focus_set()
-            self.app.ensure_visible(self.frame)
+    # ---------------------------------------------------------------- header parts
+    def _branch(self, m: Member, last: bool) -> QWidget:
+        row = QWidget()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(0)
+        holder = QWidget()
+        hv = QVBoxLayout(holder)
+        hv.setContentsMargins(0, 8, 10, 0)
+        badge = QLabel()
+        badge.setToolTip(MODE_HELP[m.mode])
+        hv.addWidget(badge, 0, Qt.AlignVCenter)
+        line = TreeLine(badge, last)
+        h.addWidget(line)
+        h.addWidget(holder)
+        text = QWidget()
+        tv = QVBoxLayout(text)
+        tv.setContentsMargins(0, 8, 0, 0)
+        tv.setSpacing(0)
+        tv.addWidget(label(folder_name(m.path), "name"))
+        tv.addWidget(label(f"{SHORT_MODE[m.mode]} · "
+                           + elide(pretty_path(os.path.dirname(m.path)) or m.path, 56), "muted"))
+        h.addWidget(text, 1)
+        self.badges.append((badge, m.mode))
         return row
 
-    def _remove_row(self, row) -> None:
-        row["frame"].destroy()
-        self.rows.remove(row)
-        for i, r in enumerate(self.rows):
-            r["frame"].grid(row=i, pady=(0 if i == 0 else self.app.px(10), 0))
-
-    def _clear_rows(self) -> None:
+    def retheme(self):
+        c = theme.pal()
+        for badge, mode in self.badges:
+            badge.setPixmap(theme.badge_pixmap(ARROW_KIND[mode], c["accent"], c["on_accent"],
+                                               30, 22, self.devicePixelRatioF() or 2))
+            badge.setFixedSize(30, 22)
+        if not self.is_new:
+            self.more.setIcon(theme.dots_icon(c["text"], 20))
+        else:
+            self._paint_dot(c["accent"])
+        self.add_btn.setIcon(theme.plus_icon(c["text"], 12))
         for r in self.rows:
-            r["frame"].destroy()
-        self.rows = []
+            r.retheme()
+        if not self.is_new and self.job is not None and self._state.get("dot"):
+            self._paint_dot(self._state["dot"])
+
+    def _paint_dot(self, color: str):
+        self.dot.setPixmap(theme.status_dot(color, 10, self.devicePixelRatioF() or 2))
+
+    # ---------------------------------------------------------------- editor
+    def _section(self, lay, title, hint=""):
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        row.addWidget(label(title, "section"))
+        if hint:
+            row.addWidget(label(hint, "muted"))
+        row.addStretch(1)
+        lay.addLayout(row)
+
+    def _build_editor(self) -> QWidget:
+        ed = QWidget()
+        v = QVBoxLayout(ed)
+        v.setContentsMargins(0, 12, 0, 0)
+        v.setSpacing(6)
+        div = QFrame()
+        div.setObjectName("divider")
+        v.addWidget(div)
+        v.addSpacing(6)
+
+        self._section(v, "Main folder", "the master copy")
+        mrow = QHBoxLayout()
+        mrow.setSpacing(8)
+        self.main_box = PathEdit()
+        self.main_box.setToolTip(BOX_HINT)
+        self.main_box.on_drop = lambda paths: self.on_drop(None, paths)
+        self.main_box.textChanged.connect(self._suggest)
+        self.main_box.returnPressed.connect(self.apply)
+        mrow.addWidget(self.main_box, 1)
+        b = button("Browse")
+        b.clicked.connect(lambda: self.browse(self.main_box, "Main folder"))
+        mrow.addWidget(b)
+        b = button("Open")
+        b.clicked.connect(lambda: self.open_path(self.main_box.text()))
+        mrow.addWidget(b)
+        v.addLayout(mrow)
+
+        v.addSpacing(10)
+        self._section(v, "Connected folders", "each one syncs with Main its own way")
+        self.rows_box = QVBoxLayout()
+        self.rows_box.setSpacing(12)
+        v.addLayout(self.rows_box)
+        add = QHBoxLayout()
+        self.add_btn = button(" Add folder")
+        self.add_btn.setIconSize(QSize(12, 12))
+        self.add_btn.clicked.connect(lambda: self.add_row(focus=True))
+        add.addWidget(self.add_btn)
+        add.addStretch(1)
+        v.addSpacing(2)
+        v.addLayout(add)
+
+        if not self.is_new:
+            v.addSpacing(10)
+            self._section(v, "Recent activity")
+            self.activity_holder = QVBoxLayout()
+            self.activity_holder.setContentsMargins(0, 0, 0, 0)
+            self.activity = None
+            v.addLayout(self.activity_holder)
+
+        self.err = label("", "error", wrap=True)
+        self.err.setVisible(False)
+        v.addWidget(self.err)
+
+        # actions, and the "are you sure?" for Remove, in the same place
+        v.addSpacing(8)
+        self.stack = QStackedWidget()
+        acts = QWidget()
+        edge = EdgeLayout(acts, 8)
+        left = QWidget()
+        lh = QHBoxLayout(left)
+        lh.setContentsMargins(0, 0, 0, 0)
+        lh.setSpacing(8)
+        right = QWidget()
+        rh = QHBoxLayout(right)
+        rh.setContentsMargins(0, 0, 0, 0)
+        rh.setSpacing(8)
+        if not self.is_new:
+            self.pause_btn = button("Pause")
+            self.pause_btn.clicked.connect(self._toggle_pause)
+            lh.addWidget(self.pause_btn)
+            self.sync_btn = button("Sync now")
+            self.sync_btn.clicked.connect(lambda: self.win.ctrl.sync_now(self.job.id))
+            lh.addWidget(self.sync_btn)
+            b = button("Remove")
+            b.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+            rh.addWidget(b)
+        b = button("Cancel")
+        b.clicked.connect(self.cancel)
+        rh.addWidget(b)
+        self.apply_btn = button("Start syncing" if self.is_new else "Apply", "primary")
+        self.apply_btn.clicked.connect(self.apply)
+        rh.addWidget(self.apply_btn)
+        edge.addWidget(left)
+        edge.addWidget(right)
+        self.stack.addWidget(acts)
+
+        sure = QWidget()
+        sh = EdgeLayout(sure, 8)
+        sh.addWidget(label("Stop this folder sync? Your files stay where they are.", wrap=False))
+        sb = QWidget()
+        sbh = QHBoxLayout(sb)
+        sbh.setContentsMargins(0, 0, 0, 0)
+        sbh.setSpacing(8)
+        b = button("Keep syncing")
+        b.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        sbh.addWidget(b)
+        b = button("Stop syncing", "danger")
+        b.clicked.connect(self._remove)
+        sbh.addWidget(b)
+        sh.addWidget(sb)
+        self.stack.addWidget(sure)
+        # the stack is as tall as the page showing
+        self.stack.currentChanged.connect(lambda i: self._fit_stack())
+        v.addWidget(self.stack)
+        self._fit_stack()
+        return ed
+
+    def _fit_stack(self):
+        for i in range(self.stack.count()):
+            self.stack.widget(i).setSizePolicy(
+                QSizePolicy.Preferred,
+                QSizePolicy.Preferred if i == self.stack.currentIndex() else QSizePolicy.Ignored)
+        self.stack.adjustSize()
+
+    # ---------------------------------------------------------------- folder rows
+    def add_row(self, member: Member | None = None, focus: bool = False) -> FolderRow:
+        row = FolderRow(self, member)
+        row.set_suggestions(self._suggestions())
+        row.remove_requested.connect(self.remove_row)
+        row.submit.connect(self.apply)
+        self.rows_box.addWidget(row)
+        self.rows.append(row)
+        if focus:
+            row.path.setFocus()
+            QTimer.singleShot(0, lambda: self.win.keep_visible(self))
+        return row
+
+    def remove_row(self, row: FolderRow):
+        self.rows.remove(row)
+        row.setParent(None)
+        row.deleteLater()
+
+    def _fill_rows(self, members):
+        """Show the job's folders, re-using the rows already built when they're the same."""
+        if [r.id for r in self.rows] != [m.id for m in members]:
+            for r in list(self.rows):
+                self.remove_row(r)
+            for m in members:
+                self.add_row(m)
+            return
+        for r, m in zip(self.rows, members):
+            r.load(m)
 
     def _suggestions(self):
-        """Offer OneDrive\\<name of Main> in each folder's dropdown (never filled in automatically)."""
-        main = self.main.get().strip().strip('"') if hasattr(self, "main") else ""
+        """Offer OneDrive\\<name of Main> in each folder's list (never filled in by itself)."""
+        main = self.main_box.text().strip().strip('"')
         name = os.path.basename(os.path.normpath(main)) if main else ""
         return [os.path.join(ONEDRIVE, name)] if ONEDRIVE and name else []
 
-    def _suggest(self):
-        values = self._suggestions()
+    def _suggest(self, *_):
+        items = self._suggestions()
         for r in self.rows:
-            r["box"].configure(values=values)
+            r.set_suggestions(items)
 
-    # ======================================================================= state
+    # ---------------------------------------------------------------- open / close
     def toggle(self):
         if self.is_new:
             return
-        self.app.set_expanded(None if self.app.expanded == self.key else self.key)
+        self.win.set_expanded(None if self.win.expanded == self.key else self.key)
 
-    def expand(self, reset: bool = True):
+    def expand(self, reset: bool = True, animate: bool = True):
         if reset and not self.is_new:
-            self.main.set(self.job.main)
+            self.main_box.setText(self.job.main)
             self._fill_rows(self.job.members)
         if not self.rows:
-            self._add_row()
-        self.err.configure(text="")
-        self._hide_confirm()
+            self.add_row()
+        self.show_error("")
+        self.stack.setCurrentIndex(0)
         self._activity_sig = None
-        self._curtain(True)
+        if not self.is_new:
+            self._show_activity()
+        self._set_open(True)
+        self.drawer.open(animate)
 
-    def collapse(self, then=None):
-        self._curtain(False, then)
+    def collapse(self, then=None, animate: bool = True):
+        self._set_open(False)
+        self.drawer.close(then, animate)
 
-    # ---- the curtain ---------------------------------------------------------
-    OPEN_MS, CLOSE_MS = 260, 200
+    def _set_open(self, on: bool):
+        self.setProperty("open", on)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
-    def _curtain(self, opening: bool, then=None) -> None:
-        """Slide the editor open (down) or closed (up)."""
-        c, ed = self.curtain, self.editor
-        if self._curtain_job is not None:
-            self.app.root.after_cancel(self._curtain_job)
-            self._curtain_job = None
-        if not opening and not c.winfo_ismapped() and not self.opened:
-            if then:
-                then()
-            return
-        start = c.winfo_height() if c.winfo_ismapped() else 0
-        # while moving, the editor keeps its full size and the curtain clips it
-        ed.pack_forget()
-        c.pack_propagate(False)
-        c.configure(height=max(1, start))
-        c.grid()
-        ed.place(in_=c, x=0, y=0, relwidth=1)
-        self.opened = opening
-        t0 = time.monotonic()
-        ms = self.OPEN_MS if opening else self.CLOSE_MS
+    @property
+    def opened(self) -> bool:
+        return self.drawer.opened
 
-        def step():
-            self._curtain_job = None
-            try:
-                t = min(1.0, (time.monotonic() - t0) * 1000 / ms)
-                if opening:
-                    e = 1 - (1 - t) ** 3                 # fast start, gentle stop
-                    full = ed.winfo_reqheight()
-                    c.configure(height=max(1, round(start + (full - start) * e)))
-                    self.app.ensure_visible(self.frame)  # the list follows the card down
-                else:
-                    e = t * t * t                        # gentle start, quick finish
-                    c.configure(height=max(1, round(start * (1 - e))))
-                if t < 1.0:
-                    self._curtain_job = self.app.root.after(12, step)
-                    return
-                ed.place_forget()
-                if opening:                              # from now on it just fits its content
-                    ed.pack(in_=c, fill="x")
-                    c.pack_propagate(True)
-                else:
-                    c.grid_remove()
-                if then:
-                    then()
-            except tk.TclError:
-                pass                                     # the card went away meanwhile
-        step()
-
-    def _fill_rows(self, members) -> None:
-        """Show the job's folders in the editor, re-using the rows already built when they
-        are the same folders (building widgets is the slow part of opening a card)."""
-        if [r["id"] for r in self.rows] != [m.id for m in members]:
-            self._clear_rows()
-            for m in members:
-                self._add_row(m)
-            return
-        for r, m in zip(self.rows, members):
-            r["path"].set(m.path)
-            r["mode"].set(MODE_LABELS[m.mode])
-            r["versions"].set(OLD_FILES_LABELS[bool(m.versions)])
-            r["keep_days"] = max(0, m.keep_days)
-            r["pos"].set(nearest_stop(m.keep_days))
-            r["settle"]()
-
-    def update(self, st, job):
-        """Refresh status, progress, buttons and recent activity from the latest snapshot."""
+    # ---------------------------------------------------------------- live status
+    def update_status(self, st, job):
         self.job = job
-        # only touch what changed: every change makes Tk lay out and redraw again
-        color = STATE_COLOR.get(st.state, STATE_COLOR["paused"])
-        if color != getattr(self, "_dot_color", None):
-            self._dot_color = color
-            self.dot.itemconfigure("dot", fill=color, outline=color)
+        color = theme.STATE_COLOR.get(st.state, theme.STATE_COLOR["paused"])
+        if self._state.get("dot") != color:
+            self._state["dot"] = color
+            self._paint_dot(color)
         bad = st.state in ("error", "empty")
-        set_if_changed(self.status, text=describe(st, job),
-                       foreground=PALETTE[self.app.theme]["error" if bad else "muted"])
+        if self._state.get("bad") != bad:
+            self._state["bad"] = bad
+            self.status.setProperty("role", "error" if bad else "muted")
+            self.status.style().unpolish(self.status)
+            self.status.style().polish(self.status)
+        set_text(self.status, describe(st, job))
         p = st.progress
         busy = st.state == "syncing" and p is not None and p.items_total > 0
         if busy:
-            set_if_changed(self.bar, value=int(p.fraction * 1000))
-            set_if_changed(self.detail, text=progress_detail(p))
-        if busy != self._bar_shown:   # track it ourselves: Tk maps widgets lazily
-            for w in (self.bar, self.detail):
-                w.grid() if busy else w.grid_remove()
-            self._bar_shown = busy
+            self.bar.setValue(int(p.fraction * 1000))
+            set_text(self.detail, progress_detail(p))
+        if self._state.get("busy") != busy:
+            self._state["busy"] = busy
+            self.bar.setVisible(busy)
+            self.detail.setVisible(busy)
         empty = st.state == "empty"
-        if empty != getattr(self, "_fix_shown", None):
-            self._fix_shown = empty
-            self.fix.grid() if empty else self.fix.grid_remove()
-        set_if_changed(self.pause_btn, text="Resume" if job.paused else "Pause")
-        if job.paused != getattr(self, "_paused_shown", None):
-            self._paused_shown = job.paused
-            self.sync_btn.state(["disabled"] if job.paused else ["!disabled"])
-        if self.app.expanded == self.key:
+        if self._state.get("empty") != empty:
+            self._state["empty"] = empty
+            self.fix.setVisible(empty)
+        if self._state.get("paused") != job.paused:
+            self._state["paused"] = job.paused
+            self.pause_btn.setText("Resume" if job.paused else "Pause")
+            self.sync_btn.setEnabled(not job.paused)
+        if self.opened:
             self._show_activity()
 
     def _show_activity(self):
-        items = self.app.ctrl.recent_activity(self.job.id, n=6)
+        items = self.win.ctrl.recent_activity(self.job.id, n=6)
         sig = tuple(items)
         if sig == self._activity_sig:
             return
         self._activity_sig = sig
-        for w in self.activity.winfo_children():
-            w.destroy()
-        self._activity_msgs = []
-        pal = PALETTE[self.app.theme]
+        box = QWidget()
+        g = QGridLayout(box)
+        g.setContentsMargins(0, 0, 0, 0)
+        g.setHorizontalSpacing(12)
+        g.setVerticalSpacing(2)
+        g.setColumnStretch(1, 1)
         if not items:
-            self.app.tint(ttk.Label(self.activity, text="Nothing yet.",
-                                    style="Card.Muted.TLabel")).grid(row=0, column=0, sticky="w")
-            return
+            g.addWidget(label("Nothing yet.", "muted"), 0, 0, 1, 2)
         for i, (t, level, msg) in enumerate(items):
-            when = time.strftime("%I:%M %p", time.localtime(t)).lstrip("0")
-            self.app.tint(ttk.Label(self.activity, text=when, style="Card.Muted.TLabel")).grid(
-                row=i, column=0, sticky="nw", padx=(0, self.app.px(12)))
-            lab = ttk.Label(self.activity, text=elide(msg, 110), style="Card.Muted.TLabel",
-                            foreground=pal["error"] if level == "error" else pal["muted"])
-            lab._tint_role = "error" if level == "error" else "muted"
-            lab.grid(row=i, column=1, sticky="w")
-            self._activity_msgs.append(lab)
-        self._wrap_activity()
+            g.addWidget(label(time.strftime("%I:%M %p", time.localtime(t)).lstrip("0"), "muted"),
+                        i, 0, Qt.AlignTop)
+            g.addWidget(label(msg, "error" if level == "error" else "muted", wrap=True), i, 1)
+        if self.activity is not None:
+            self.activity_holder.removeWidget(self.activity)
+            self.activity.deleteLater()
+        self.activity = box
+        self.activity_holder.addWidget(box)
 
-    def _wrap_activity(self) -> None:
-        """Wrap activity lines to the space beside the times."""
-        try:
-            bbox = self.activity.grid_bbox(1, 0)
-        except tk.TclError:
-            return
-        width = self.activity.winfo_width() - bbox[0]
-        if width > 50:
-            for lab in self._activity_msgs:
-                if _px(lab.cget("wraplength")) != width:
-                    lab.configure(wraplength=width, justify="left")
+    # ---------------------------------------------------------------- actions
+    def show_error(self, text: str):
+        self.err.setText(text)
+        self.err.setVisible(bool(text))
 
-    # ======================================================================= actions
     def values(self):
-        main = self.main.get().strip().strip('"')
-        members = []
-        mode_of = {v: k for k, v in MODE_LABELS.items()}
-        for r in self.rows:
-            path = r["path"].get().strip().strip('"')
-            if not path:
-                continue
-            versions = r["versions"].get() == OLD_FILES_LABELS[True]
-            r["settle"]()
-            keep_days = r["keep_days"]
-            members.append(Member(path=path, mode=mode_of.get(r["mode"].get(), "two-way"),
-                                  versions=versions, keep_days=keep_days,
-                                  **({"id": r["id"]} if r["id"] else {})))
+        main = self.main_box.text().strip().strip('"')
+        members = [m for m in (r.value() for r in self.rows) if m is not None]
         return main, members
 
     def fill(self, folders) -> None:
         """Put dropped folders into empty boxes: Main first, then connected folders."""
         for p in folders:
-            if not self.main.get().strip():
-                self.main.set(p)
+            if not self.main_box.text().strip():
+                self.main_box.setText(p)
                 continue
-            empty = next((r for r in self.rows if not r["path"].get().strip()), None)
-            (empty or self._add_row())["path"].set(p)
+            empty = next((r for r in self.rows if not r.path.text().strip()), None)
+            (empty or self.add_row()).path.setText(p)
 
     def on_drop(self, row, paths) -> None:
-        """Folders dropped on a box (row=None means the Main box). Extra folders are
-        added as more connected folders."""
+        """Folders dropped on a box (row=None means Main); extra ones become more rows."""
         folders = [p for p in paths if os.path.isdir(p)]
         if not folders:
-            self.err.configure(text="That's a file. Drop a folder instead.")
+            self.show_error("That's a file. Drop a folder instead.")
             return
-        self.err.configure(text="")
+        self.show_error("")
         first, rest = folders[0], folders[1:]
-        (self.main if row is None else row["path"]).set(first)
+        (self.main_box if row is None else row.path).setText(first)
         for p in rest:
-            empty = next((r for r in self.rows if not r["path"].get().strip()), None)
-            (empty or self._add_row())["path"].set(p)
+            empty = next((r for r in self.rows if not r.path.text().strip()), None)
+            (empty or self.add_row()).path.setText(p)
 
-    def _browse(self, var, what):
-        start = var.get().strip() if os.path.isdir(var.get().strip()) else None
-        p = filedialog.askdirectory(parent=self.app.root, initialdir=start, title=f"Choose {what}")
+    def browse(self, box, what):
+        start = box.text().strip()
+        p = QFileDialog.getExistingDirectory(self.win, f"Choose {what}",
+                                             start if os.path.isdir(start) else "")
         if p:
-            var.set(os.path.normpath(p))
+            box.setText(os.path.normpath(p))
 
-    def _open(self, path):
+    @staticmethod
+    def open_path(path):
         path = path.strip().strip('"')
         if os.path.isdir(path):
             open_folder(path)
 
     def _toggle_pause(self):
-        self.app.ctrl.set_paused(self.job.id, not self.job.paused)
-
-    def _ask_remove(self):
-        self.actions.grid_remove()
-        self.confirm.grid()
-
-    def _hide_confirm(self):
-        self.confirm.grid_remove()
-        self.actions.grid()
+        self.win.ctrl.set_paused(self.job.id, not self.job.paused)
 
     def _remove(self):
-        self.app.ctrl.remove_job(self.job.id)
-        self.app.set_expanded(None)
+        jid = self.job.id
+        self.win.expanded = None
+        self.collapse(then=lambda: self.win.remove_card(self, jid))
 
     def cancel(self):
         if self.is_new:
-            self.collapse(then=self.app.close_draft)
+            self.collapse(then=self.win.close_draft)
         else:
-            self.app.set_expanded(None)
+            self.win.set_expanded(None)
 
     def _unchanged(self, main, members) -> bool:
         j = self.job
@@ -714,16 +827,19 @@ class JobCard:
     def apply(self):
         main, members = self.values()
         if not self.is_new and self._unchanged(main, members):
-            self.app.set_expanded(None)
+            self.win.set_expanded(None)
             return
-        problem = self.app.prepare_folders(main, [m.path for m in members],
+        problem = self.win.prepare_folders(main, [m.path for m in members],
                                            ignore=None if self.is_new else self.job.id)
         if problem:
-            self.err.configure(text=problem)
+            self.show_error(problem)
             return
         if self.is_new:
-            self.app.ctrl.add_job(main, members)
-            self.app.close_draft()
+            # start syncing once the card has slid shut (so the list changes only then)
+            self.collapse(then=lambda: (self.win.ctrl.add_job(main, members),
+                                        self.win.close_draft()))
         else:
-            self.app.ctrl.update_job(self.job.id, main, members)
-            self.app.set_expanded(None)
+            jid = self.job.id
+            self.win.expanded = None
+            self.collapse(then=lambda: (self.win.ctrl.update_job(jid, main, members),
+                                        self.win.after_change()))

@@ -10,9 +10,11 @@ moving it.
    (or from python.org; tick **Add python.exe to PATH**).
 2. Double-click **`build.bat`** in the version's folder. A couple of minutes later the app is
    ready in a folder named after its version, **outside** the version folders, e.g.
-   `D:\syncmate\build 2.5\SyncMate.exe` (with its icon and build log).
+   `D:\syncmate\build 3.0\SyncMate.exe` (with its icon and build log).
 
-   The build tools (Python libraries, about 50 MB) are kept in
+   Version 3 draws its window with **Qt** (PySide6, free and open source). The first build
+   downloads it (about 100 MB), so it takes a few minutes; later builds are quick.
+   The build tools (Python libraries) are kept in
    `%LOCALAPPDATA%\SyncMate\build-env`, not in your SyncMate folder, and are reused by every
    build. No `.venv` or `__pycache__` folders are left behind; leftovers from older builds
    are removed. You don't need any of them to *run* SyncMate, only to build it.
@@ -23,7 +25,7 @@ moving it.
    wrong, the window stays open so you can read why. If *Start with Windows* is on, it
    follows to the newest build the next time that build runs.
 
-3. Run `build 2.5\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+3. Run `build 3.0\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
    **connected folders**, and click **Start syncing**. You can also **drag folders from
    File Explorer** onto the boxes or onto the window (several at once: the first becomes
    Main, the rest connected folders).
@@ -36,9 +38,10 @@ moving it.
    connected folders and **Apply**; Pause / Resume, Sync now, see its **recent activity**,
    or Remove it.
 
-   The window rearranges itself when you make it narrow (rows wrap and stack). A folder sync
-   opens downward like a curtain (and closes back up), the settings menu fades in, and
-   switching theme is a single quick redraw.
+   Qt draws the whole window off-screen and shows only finished pictures, so nothing is
+   ever seen half-drawn: a folder sync slides open downward like a curtain (and back up),
+   switching theme cross-fades to the new colours, and the settings menu fades and slides
+   in. The window rearranges itself when you make it narrow (rows wrap).
    The **⚙ settings** button (top right) has Start with Windows, the Theme slider
    (Auto / Light / Dark), **Export / Import** of your folder sync configurations, and the full
    activity log.
@@ -125,13 +128,14 @@ are compared once.
 
 | File | Purpose |
 |---|---|
-| `app.py` | Window, tray icon, settings panel, start-with-Windows |
-| `cards.py` | The folder-sync cards: status, live progress, recent activity, and the expand-to-edit panel |
-| `ui_common.py` | Shared helpers for the window (paths, times, sizes, colours) |
-| `widgets.py` | The sliding theme switch and the gear icon |
+| `app.py` | Window, tray icon, settings menu, activity log, export/import, start-with-Windows |
+| `cards.py` | The folder-sync cards: the folder tree, status, live progress, and the editor that slides open |
+| `controls.py` | Toggle switch, theme picker, wrapping rows, tree lines, folder boxes that take dropped folders |
+| `theme.py` | Light and dark colours, the window's style sheet, and the icons (drawn in code) |
+| `ui_common.py` | Shared helpers (paths, times, sizes) |
 | `watcher.py` | Watches every folder of every job, batches changes, runs syncs in the background |
 | `engine.py` | The sync rules for each sync type, and version keeping |
 | `store.py` | Jobs, settings and sync history (older single-pair settings are converted automatically) |
 | `icon.py` | Draws the icon |
 | `version.py` | The version number (shown in settings; names the build folder) |
-| `tests/` | Automated tests: `py -m pytest tests` |
+| `tests/` | Automated tests of syncing and of the window: `py -m pytest tests` |

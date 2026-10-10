@@ -1,46 +1,39 @@
-"""SyncMate — keep any two folders in sync, continuously, in both directions."""
+"""SyncMate — keep folders in sync, continuously. The window (Qt / PySide6)."""
 from __future__ import annotations
 
 import argparse
+import io
 import os
-import queue
 import sys
 import time
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
-import tkinter.font as tkfont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import sv_ttk  # noqa: E402
-from PIL import ImageTk  # noqa: E402
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QParallelAnimationGroup,  # noqa: E402
+                            QPoint, QPropertyAnimation, QSize, Qt, QTimer)
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPalette, QPixmap  # noqa: E402
+from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame,  # noqa: E402
+                               QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QHBoxLayout,
+                               QHeaderView, QLabel, QMainWindow, QMenu, QMessageBox,
+                               QScrollArea, QSystemTrayIcon,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from icon import COLORS, make_icon, save_ico  # noqa: E402
+import theme  # noqa: E402
+from cards import JobCard, button, label  # noqa: E402
+from controls import Segmented, ToggleSwitch, dropped_folders  # noqa: E402
+from icon import make_icon  # noqa: E402
 from store import (CONFIG_EXT, Member, app_dir, data_dir, export_settings,  # noqa: E402
                    read_settings_file)
+from ui_common import IS_WIN, elide, open_folder  # noqa: E402
 from version import VERSION  # noqa: E402
-from widgets import (FlowRow, Flyout, SlideSwitch, Tooltip, dots, fade_in, gear,  # noqa: E402
-                     plus, red_x, sync_arrow)
-from cards import JobCard  # noqa: E402
-from ui_common import IS_WIN, PALETTE, elide, open_folder  # noqa: E402
 from watcher import Controller, _overlaps  # noqa: E402
-
-try:  # drag-and-drop of folders from File Explorer (optional; app works without it)
-    from tkinterdnd2 import DND_FILES, TkinterDnD
-except Exception:  # pragma: no cover
-    TkinterDnD = None
-
-try:
-    import darkdetect
-except Exception:  # pragma: no cover
-    darkdetect = None
 
 APP = "SyncMate"
 SHOW_FLAG = os.path.join(app_dir(), "show.flag")   # "please show your window"
 QUIT_FLAG = os.path.join(app_dir(), "quit.flag")   # "please quit" (used by build.bat)
 
-# ============================================================== Windows helpers
 
+# ============================================================== Windows helpers
 def single_instance(signal: str = SHOW_FLAG) -> bool:
     """True if we're the only SyncMate running. Otherwise pass `signal` to the running one."""
     if not IS_WIN:
@@ -54,24 +47,14 @@ def single_instance(signal: str = SHOW_FLAG) -> bool:
     return True
 
 
-def dpi_aware() -> None:
-    if IS_WIN:
-        try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-
-
-def dark_titlebar(win: tk.Misc, dark: bool) -> None:
+def dark_titlebar(win: QWidget, dark: bool) -> None:
     if not IS_WIN:
         return
     try:
         import ctypes
-        win.update_idletasks()
-        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
         val = ctypes.c_int(1 if dark else 0)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(val), ctypes.sizeof(val))
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(int(win.winId()), 20, ctypes.byref(val),
+                                                   ctypes.sizeof(val))
     except Exception:
         pass
 
@@ -113,800 +96,491 @@ def set_autostart(on: bool) -> None:
                 pass
 
 
-# ============================================================== UI
+def pil_to_pixmap(img) -> QPixmap:
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    pm = QPixmap()
+    pm.loadFromData(buf.getvalue(), "PNG")
+    return pm
 
-class App:
-    def __init__(self, ctrl: Controller, start_hidden: bool = False):
-        self.ctrl = ctrl
-        self.q: queue.Queue = queue.Queue()
+
+def app_icon(state: str = "synced") -> QIcon:
+    icon = QIcon()
+    for s in (16, 20, 24, 32, 48, 64, 128, 256):
+        icon.addPixmap(pil_to_pixmap(make_icon(state, s)))
+    return icon
+
+
+# ============================================================== settings flyout
+class SettingsFlyout(QWidget):
+    """The ⚙ menu: a panel that fades and slides down from the gear button."""
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        self.win = win
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 10, 14, 18)          # room for the soft shadow
+        panel = self.panel = QFrame()
+        panel.setObjectName("flyout")
+        shadow = QGraphicsDropShadowEffect(panel)
+        shadow.setBlurRadius(28)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 60))
+        panel.setGraphicsEffect(shadow)
+        outer.addWidget(panel)
+        v = QVBoxLayout(panel)
+        v.setContentsMargins(18, 14, 18, 14)
+        v.setSpacing(10)
+        v.addWidget(label("Settings", "name"))
+        self.autostart = ToggleSwitch("Start with Windows")
+        self.autostart.setChecked(get_autostart())
+        self.autostart.setEnabled(IS_WIN)
+        self.autostart.toggled.connect(win.set_autostart)
+        v.addWidget(self.autostart)
+        v.addWidget(self._divider())
+        v.addWidget(label("Theme"))
+        self.theme = Segmented([("auto", "Auto"), ("light", "Light"), ("dark", "Dark")],
+                               win.ctrl.config.theme)
+        self.theme.changed.connect(win.set_theme_pref)
+        v.addWidget(self.theme)
+        v.addWidget(self._divider())
+        v.addWidget(label("Folder sync configurations"))
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        b = button("Export")
+        b.clicked.connect(lambda: (self.hide(), win.export_syncs()))
+        row.addWidget(b)
+        b = button("Import")
+        b.clicked.connect(lambda: (self.hide(), win.import_syncs()))
+        row.addWidget(b)
+        row.addStretch(1)
+        v.addLayout(row)
+        v.addWidget(self._divider())
+        b = button("View activity log")
+        b.clicked.connect(lambda: (self.hide(), win.show_activity()))
+        v.addWidget(b)
+        foot = label(f"{APP} {VERSION} - By Er.K.K.", "faint")
+        foot.setAlignment(Qt.AlignRight)
+        v.addWidget(foot)
+        self.hidden_at = 0.0
+        self.fade = QPropertyAnimation(self, b"windowOpacity", self)
+        self.slide = QPropertyAnimation(self, b"pos", self)
+        self.group = QParallelAnimationGroup(self)
+        self.group.addAnimation(self.fade)
+        self.group.addAnimation(self.slide)
+
+    @staticmethod
+    def _divider():
+        d = QFrame()
+        d.setObjectName("divider")
+        return d
+
+    def popup(self, anchor: QWidget):
+        self.adjustSize()
+        m = self.layout().contentsMargins()
+        right = anchor.mapToGlobal(QPoint(anchor.width(), anchor.height() + 6))
+        end = QPoint(right.x() - self.width() + m.right(), right.y() - m.top())
+        start = end - QPoint(0, 10)
+        self.setWindowOpacity(0.0)
+        self.move(start)
+        self.show()
+        for a, (s, e) in ((self.fade, (0.0, 1.0)), (self.slide, (start, end))):
+            a.setDuration(170)
+            a.setEasingCurve(QEasingCurve.OutCubic)
+            a.setStartValue(s)
+            a.setEndValue(e)
+        self.group.start()
+
+    def hideEvent(self, e):                   # noqa: N802
+        self.hidden_at = time.monotonic()
+        super().hideEvent(e)
+
+
+# ============================================================== activity log
+class ActivityWindow(QDialog):
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("SyncMate — Activity")
+        self.resize(760, 440)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 16)
+        top = QHBoxLayout()
+        top.addWidget(label("Activity", "title"))
+        top.addStretch(1)
+        b = button("Open log file")
+        b.clicked.connect(lambda: open_folder(data_dir()))
+        top.addWidget(b)
+        v.addLayout(top)
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderLabels(["Time", "What happened"])
+        self.tree.setRootIsDecorated(False)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tree.header().setStretchLastSection(True)
+        v.addWidget(self.tree, 1)
+        self._seen = None
+        self.refresh()
+
+    def refresh(self):
+        items = list(self.win.ctrl.activity)
+        head = items[0] if items else None
+        if head == self._seen:
+            return
+        self._seen = head
+        self.tree.clear()
+        c = theme.pal()
+        for t, _pid, level, msg in items:
+            it = QTreeWidgetItem([time.strftime("%H:%M:%S", time.localtime(t)), msg])
+            if level == "error":
+                for col in (0, 1):
+                    it.setForeground(col, QColor(c["error"]))
+            elif level == "warn":
+                for col in (0, 1):
+                    it.setForeground(col, QColor(theme.STATE_COLOR["syncing"]))
+            self.tree.addTopLevelItem(it)
+
+
+# ============================================================== main window
+class MainWindow(QMainWindow):
+    def __init__(self, app: QApplication, ctrl: Controller, start_hidden: bool = False):
+        super().__init__()
+        self.qapp, self.ctrl = app, ctrl
         self.cards: dict = {}
         self.card_sig = None
-        self.expanded = None   # key of the expanded card: a pair id, "new", or None
-        self._draft = False    # is the "New folder sync" card showing?
-        self.card_ids = None
+        self.expanded = None          # key of the open card: a job id, "new", or None
+        self._draft = False
+        self._summary_override = None
         self.activity_win = None
         self.tray = None
+        self._busy = False
 
-        self.root = root = self._make_root()
-        root.withdraw()
-        root.title(f"{APP} - {VERSION}")
-        self.S = root.winfo_fpixels("1i") / 96  # display scale
-        root.geometry(f"{self.px(820)}x{self.px(640)}")
-        root.minsize(self.px(440), self.px(380))
-        self._set_window_icon()
-        self._heal_autostart()
+        self.setWindowTitle(f"{APP} - {VERSION}")
+        self.setWindowIcon(app_icon())
+        self.resize(880, 680)
+        self.setMinimumSize(460, 420)
+        self.setAcceptDrops(True)
 
-        self.theme = self._wanted_theme()
-        self.tooltip = Tooltip(root)
-        sv_ttk.set_theme(self.theme)
-        self._fonts()
-        self._styles()
+        self.theme = self.wanted_theme()
+        self._apply_style(self.theme)
         self._build()
+        self.flyout = SettingsFlyout(self)
         self.refresh()
-
-        root.protocol("WM_DELETE_WINDOW", self.hide)
+        self._heal_autostart()
         self._start_tray()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._poll)
+        self.timer.start(600)
+        hints = QGuiApplication.styleHints()
+        if hasattr(hints, "colorSchemeChanged"):
+            hints.colorSchemeChanged.connect(lambda *_: self._follow_system())
         if not start_hidden or self.tray is None:
             self.show()
-        root.after(200, self._poll)
+            dark_titlebar(self, self.theme == "dark")
 
-    # ---------------------------------------------------------------- look & feel
+    # ---------------------------------------------------------------- layout
+    def _build(self):
+        page = QWidget()
+        page.setObjectName("page")
+        self.setCentralWidget(page)
+        v = QVBoxLayout(page)
+        v.setContentsMargins(24, 20, 24, 14)
+        v.setSpacing(14)
 
-    @staticmethod
-    def _make_root() -> tk.Tk:
-        if TkinterDnD is not None:
-            try:
-                return TkinterDnD.Tk()
-            except Exception:
-                pass
-        return tk.Tk()
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        titles.addWidget(label(APP, "title"))
+        self.summary = label("", "muted")
+        titles.addWidget(self.summary)
+        head.addLayout(titles)
+        head.addStretch(1)
+        self.add_btn = button(" Add folder sync", "primary")
+        self.add_btn.setIconSize(QSize(14, 14))
+        self.add_btn.clicked.connect(lambda: self.new_sync())
+        head.addWidget(self.add_btn, 0, Qt.AlignVCenter)
+        self.gear = button("", "icon", "Settings")
+        self.gear.setIconSize(QSize(18, 18))
+        self.gear.clicked.connect(self.toggle_settings)
+        head.addWidget(self.gear, 0, Qt.AlignVCenter)
+        v.addLayout(head)
 
-    @property
-    def can_drop(self) -> bool:
-        return hasattr(self.root, "drop_target_register")
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # The scroll bar always keeps its place (it's just invisible when there's nothing
+        # to scroll). If it came and went, the cards would get narrower/wider, re-wrap,
+        # change height and make it come and go again: a jitter loop.
+        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        sb = self.scroll.verticalScrollBar()
 
-    def drop_target(self, widget, on_paths, on_hover=None) -> None:
-        """Let folders be dragged from File Explorer onto `widget`.
-        on_paths(list_of_paths) runs on drop; on_hover(True/False) while dragging over."""
-        if not self.can_drop:
-            return
-        def enter(e):
-            if on_hover:
-                on_hover(True)
-            return e.action
-        def leave(e):
-            if on_hover:
-                on_hover(False)
-            return e.action
-        def drop(e):
-            if on_hover:
-                on_hover(False)
-            on_paths([os.path.normpath(p) for p in self.root.tk.splitlist(e.data)])
-            return e.action
-        try:
-            widget.drop_target_register(DND_FILES)
-            widget.dnd_bind("<<DropEnter>>", enter)
-            widget.dnd_bind("<<DropPosition>>", lambda e: e.action)
-            widget.dnd_bind("<<DropLeave>>", leave)
-            widget.dnd_bind("<<Drop>>", drop)
-        except Exception:
-            pass
+        def idle(lo, hi, sb=sb):
+            sb.setProperty("idle", hi <= lo)
+            sb.style().unpolish(sb)
+            sb.style().polish(sb)
+        sb.rangeChanged.connect(idle)
+        idle(0, 0)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.list = QWidget()
+        self.list.setObjectName("list")
+        self.list_box = QVBoxLayout(self.list)
+        self.list_box.setContentsMargins(0, 0, 4, 0)
+        self.list_box.setSpacing(10)
+        self.list_box.addStretch(1)
+        self.scroll.setWidget(self.list)
+        v.addWidget(self.scroll, 1)
 
-    def on_main_drop(self, paths) -> None:
-        """Folders dropped on the main window: open (or fill) the new folder sync card."""
-        folders = [p for p in paths if os.path.isdir(p)]
-        if not folders:
-            self._flash_summary("Drop folders, not files, to add a folder sync.")
-            return
-        self.new_sync(prefill=folders)
+        foot = QHBoxLayout()
+        foot.addStretch(1)
+        b = button("Sync now", tip="Check all folder syncs for changes right away")
+        b.clicked.connect(lambda: self.ctrl.sync_now())
+        foot.addWidget(b)
+        v.addLayout(foot)
+        self._retheme_icons()
 
-    def _flash_summary(self, text: str, ms: int = 2500) -> None:
-        self._summary_override = text
-        self.refresh()
-
-        def clear():
-            if self._summary_override == text:
-                self._summary_override = None
-                self.refresh()
-        self.root.after(ms, clear)
-
-    @staticmethod
-    def _heal_autostart():
-        """Builds now live in their own 'build <version>' folders. If Start with Windows is
-        on, point it at whichever SyncMate.exe is running now."""
-        try:
-            if get_autostart():
-                set_autostart(True)
-        except OSError:
-            pass
-
-    def _set_window_icon(self):
-        """Title bar / taskbar icon. On Windows use a real multi-size .ico (crisp at 16 px);
-        it's generated fresh from icon.py on every start, so it always matches this build."""
-        self._icon_img = ImageTk.PhotoImage(make_icon("synced", 64))
-        if IS_WIN:
-            try:
-                path = os.path.join(app_dir(), "window.ico")
-                save_ico(path)
-                self.root.iconbitmap(default=path)
-                return
-            except Exception:
-                pass
-        self.root.iconphoto(True, self._icon_img)
-
-    def px(self, n: float) -> int:
-        return int(round(n * self.S))
-
-    def _wanted_theme(self) -> str:
-        """The theme to show: the user's choice, or Windows' own setting when on Auto."""
+    # ---------------------------------------------------------------- theme
+    def wanted_theme(self) -> str:
         pref = self.ctrl.config.theme
-        return pref if pref in ("light", "dark") else self._system_theme()
+        return self.system_theme() if pref == "auto" else pref
 
-    def set_theme_pref(self, pref: str) -> None:
-        self.ctrl.remember(theme=pref)
-        t = self._wanted_theme()
-        if t != self.theme:
-            # let the switch finish sliding, then cross-fade the whole window to the new look
-            self.root.after(170, lambda: self._wanted_theme() == t and self.theme != t and
-                            self.switch_theme(t))
-
-    def _system_theme(self) -> str:
+    @staticmethod
+    def system_theme() -> str:
         try:
-            return "dark" if darkdetect and darkdetect.theme() == "Dark" else "light"
+            scheme = QGuiApplication.styleHints().colorScheme()
+            return "dark" if scheme == Qt.ColorScheme.Dark else "light"
         except Exception:
             return "light"
 
-    def _fonts(self):
-        fams = set(tkfont.families(self.root))
-        body = next((f for f in ("Segoe UI Variable Text", "Segoe UI", "Inter", "Cantarell",
-                                 "DejaVu Sans") if f in fams), "TkDefaultFont")
-        disp = next((f for f in ("Segoe UI Variable Display", "Segoe UI Semibold", body)
-                     if f in fams), body)
-        self.f_title = tkfont.Font(family=disp, size=18, weight="bold")
-        self.f_body = tkfont.Font(family=body, size=10)
-        self.f_bold = tkfont.Font(family=body, size=10, weight="bold")
-        self.f_small = tkfont.Font(family=body, size=9)
-        self.f_arrow = tkfont.Font(family=body, size=14)
+    def _apply_style(self, name: str):
+        theme.set_current(name)
+        c = theme.PALETTES[name]
+        pal = QPalette()
+        for role, key in ((QPalette.Window, "window"), (QPalette.WindowText, "text"),
+                          (QPalette.Base, "field"), (QPalette.AlternateBase, "surface2"),
+                          (QPalette.Text, "text"), (QPalette.Button, "button"),
+                          (QPalette.ButtonText, "text"), (QPalette.Highlight, "accent"),
+                          (QPalette.HighlightedText, "on_accent"),
+                          (QPalette.ToolTipBase, "tooltip"), (QPalette.ToolTipText, "on_tooltip"),
+                          (QPalette.PlaceholderText, "faint"), (QPalette.Link, "accent")):
+            pal.setColor(role, QColor(c[key]))
+        self.qapp.setPalette(pal)
+        self.qapp.setStyleSheet(theme.style_sheet(name))
 
-    def _line_height(self) -> int:
-        """Height of one line of button text; icons this tall keep buttons the same height."""
-        try:
-            return tkfont.nametofont("SunValleyBodyFont").metrics("linespace")
-        except tk.TclError:
-            return self.f_body.metrics("linespace")
-
-    SV_THEMES = {"light": ("sun-valley-light", "sv_light"), "dark": ("sun-valley-dark", "sv_dark")}
-
-    def _styles(self):
-        """Set up every style for BOTH themes, once.
-
-        ttk keeps styles per theme, so with both prepared a theme switch is a single
-        ttk pass: no style is changed at switch time (changing one makes Tk lay out and
-        redraw every widget again)."""
-        s = ttk.Style()
-        tk_ = self.root.tk
-        for theme, (name, ns) in self.SV_THEMES.items():
-            pal = PALETTE[theme]
-            c = dict(zip(*[iter(tk_.splitlist(tk_.call("array", "get",
-                                                        f"::ttk::theme::{ns}::colors")))] * 2))
-            card = pal["bg"]
-            self.__dict__.setdefault("_sv_colors", {})[theme] = c
-            settings = {
-                # what Sun Valley sets each time the theme changes, set up front instead
-                ".": {"configure": {"background": c["-bg"], "foreground": c["-fg"],
-                                    "troughcolor": c["-bg"], "focuscolor": c["-selbg"],
-                                    "selectbackground": c["-selbg"],
-                                    "selectforeground": c["-selfg"], "insertwidth": 1,
-                                    "insertcolor": c["-fg"], "fieldbackground": c["-bg"],
-                                    "font": "SunValleyBodyFont", "borderwidth": 0,
-                                    "relief": "flat"},
-                      "map": {"foreground": [("disabled", c["-disfg"])]}},
-                "Title.TLabel": {"configure": {"font": str(self.f_title)}},
-                "Icon.TButton": {"configure": {"padding": (6, 2, 6, 3)}},
-                "Body.TLabel": {"configure": {"font": str(self.f_body)}},
-                "Muted.TLabel": {"configure": {"font": str(self.f_small), "foreground": pal["muted"]}},
-                "Name.TLabel": {"configure": {"font": str(self.f_bold)}},
-                "Error.TLabel": {"configure": {"font": str(self.f_small), "foreground": pal["error"]}},
-                "Inner.TFrame": {"configure": {"background": card}},
-                "Card.Name.TLabel": {"configure": {"font": str(self.f_bold), "background": card}},
-                "Card.Body.TLabel": {"configure": {"font": str(self.f_body), "background": card}},
-                "Card.Muted.TLabel": {"configure": {"font": str(self.f_small), "background": card,
-                                                    "foreground": pal["muted"]}},
-                "Card.Error.TLabel": {"configure": {"font": str(self.f_small), "background": card,
-                                                    "foreground": pal["error"]}},
-            }
-            s.theme_settings(name, settings)
-        # Sun Valley also walks every widget on each theme change (Tk's tk_setPalette) to
-        # recolour plain Tk widgets. SyncMate colours its own, so keep only the cheap part:
-        # the default colours for widgets made later.
-        tk_.eval("""
-            proc configure_colors {} {
-                switch -- [ttk::style theme use] {
-                    sun-valley-dark {set ns sv_dark}
-                    sun-valley-light {set ns sv_light}
-                    default {return}
-                }
-                upvar #0 ::ttk::theme::${ns}::colors c
-                foreach {opt val} [list background $c(-bg) foreground $c(-fg) \
-                        highlightColor $c(-selbg) highlightBackground $c(-bg) \
-                        selectBackground $c(-selbg) selectForeground $c(-selfg) \
-                        activeBackground $c(-selbg) activeForeground $c(-selfg) \
-                        insertBackground $c(-fg) troughColor $c(-bg) \
-                        disabledForeground $c(-disfg)] {
-                    option add *$opt $val widgetDefault
-                }
-                . configure -background $c(-bg)
-            }
-        """)
-        self.bg = self.card_bg = PALETTE[self.theme]["bg"]
-
-    def switch_theme(self, theme: str) -> None:
-        """Switch light/dark. Everything for both themes is prepared at start-up, so this
-        is one ttk pass plus recolouring only the few widgets SyncMate draws itself."""
-        if theme == self.theme:
+    def switch_theme(self, name: str, animate: bool = True):
+        """Cross-fade to the other theme: a picture of the window as it is fades away over
+        the window already redrawn in the new colours (Qt draws off-screen, so nothing
+        half-drawn is ever shown)."""
+        if name == self.theme:
             return
-        old_bg = PALETTE[self.theme]["bg"]
-        self.theme = theme
-        self.bg = self.card_bg = PALETTE[theme]["bg"]
-        self.tooltip.hide()
-        sv_ttk.set_theme(theme)
-        self._paint_theme(old_bg)
-        for card in self.cards.values():    # cards keep their widgets; only icons change
+        cover = None
+        if animate and self.isVisible():
+            page = self.centralWidget()
+            cover = QLabel(page)
+            cover.setPixmap(page.grab())
+            cover.setGeometry(page.rect())
+            cover.setAttribute(Qt.WA_TransparentForMouseEvents)
+            cover.show()
+            cover.raise_()
+        self.theme = name
+        self._apply_style(name)
+        self._retheme_icons()
+        for card in self.cards.values():
             card.retheme()
-        dark_titlebar(self.root, theme == "dark")
-        if self.activity_win and self.activity_win.winfo_exists():
-            dark_titlebar(self.activity_win.win, theme == "dark")
+        dark_titlebar(self, name == "dark")
+        if self.activity_win is not None:
+            dark_titlebar(self.activity_win, name == "dark")
+            self.activity_win._seen = None
+            self.activity_win.refresh()
+        if cover is not None:
+            fx = QGraphicsOpacityEffect(cover)
+            cover.setGraphicsEffect(fx)
+            a = QPropertyAnimation(fx, b"opacity", cover)
+            a.setDuration(260)
+            a.setStartValue(1.0)
+            a.setEndValue(0.0)
+            a.setEasingCurve(QEasingCurve.InOutQuad)
+            a.finished.connect(cover.deleteLater)
+            a.start()
+        self.flyout.update()
 
-    def _paint_theme(self, old_bg=None):
-        """Apply the current theme's colours to every widget we colour ourselves.
-        (Never changes ttk styles: that would fire <<ThemeChanged>> all over again.)"""
-        self.canvas.configure(background=self.bg)
-        self.root.configure(background=self.bg)    # shows at the new edge while resizing
-        self.flyout.set_bg(self.card_bg)
-        self.head_row.set_bg(self.bg)
-        self._recolor_plain(self.root, old_bg)
-        win = self.activity_win.win if self.activity_win and self.activity_win.winfo_exists() else None
-        if win is not None:
-            self._recolor_plain(win, old_bg)
-        self._retint()
-        if win is not None:
-            self._retint(win)
-            self.activity_win.tree.tag_configure("error", foreground=PALETTE[self.theme]["error"])
-        self._theme_custom_widgets()
+    def set_theme_pref(self, pref: str):
+        self.ctrl.remember(theme=pref)
+        self.switch_theme(self.wanted_theme())
 
-    def _recolor_plain(self, parent, old_bg=None):
-        """Plain Tk frames/labels got their background when they were built; move them over."""
-        stale = {c.lower() for c in (old_bg, PALETTE["light"]["bg"], PALETTE["dark"]["bg"]) if c}
-        try:
-            children = parent.winfo_children()
-        except tk.TclError:
-            return
-        fg = PALETTE[self.theme]["fg"].lower()
-        bg = self.bg.lower()
-        for w in children:
-            if isinstance(w, FlowRow):
-                w.bg = self.bg               # for line frames it makes later
-            try:
-                cls = w.winfo_class()
-                # only change what differs: every change makes Tk redraw that widget
-                if cls == "TLabel":
-                    # Tk copies the window colour into each ttk label when it is created
-                    if str(w.cget("background")).lower() != bg:
-                        w.configure(background=self.bg)
-                    if not getattr(w, "_tint_role", None) and \
-                            str(w.cget("foreground")).lower() != fg:   # plain text colour
-                        w.configure(foreground=PALETTE[self.theme]["fg"])
-                elif cls in ("Frame", "Label", "Canvas"):
-                    if str(w.cget("background")).lower() in stale - {bg}:
-                        w.configure(background=self.bg)
-                elif cls == "TCombobox":
-                    self._recolor_dropdown(w)
-            except tk.TclError:
-                pass        # one odd widget must never stop the rest from being recoloured
-            self._recolor_plain(w, old_bg)
+    def _follow_system(self):
+        if self.ctrl.config.theme == "auto":
+            self.switch_theme(self.wanted_theme())
 
-    def _recolor_dropdown(self, box) -> None:
-        """A dropdown's list is a plain Tk listbox in its own pop-up window."""
-        c = self._sv_colors[self.theme]
-        lb = f"{box.tk.call('ttk::combobox::PopdownWindow', box)}.f.l"
-        if str(box.tk.call(lb, "cget", "-background")).lower() != c["-bg"].lower():
-            box.tk.call(lb, "configure", "-background", c["-bg"], "-foreground", c["-fg"],
-                        "-selectbackground", c["-selbg"], "-selectforeground", c["-selfg"])
+    def _retheme_icons(self):
+        c = theme.pal()
+        self.add_btn.setIcon(theme.plus_icon(c["on_accent"], 14, weight=0.16))
+        self.gear.setIcon(theme.gear_icon(c["text"], 18))
+        self._empty_icon = None
 
-    def tint(self, w, role="muted"):
-        """Colour a label's text. (Sun Valley overrides style colours, so set them directly.)"""
-        w.configure(foreground=PALETTE[self.theme][role])
-        w._tint_role = role
-        return w
-
-    def _retint(self, parent=None):
-        for w in (parent or self.root).winfo_children():
-            role = getattr(w, "_tint_role", None)
-            if role:
-                try:
-                    want = PALETTE[self.theme][role]
-                    if str(w.cget("foreground")).lower() != want.lower():
-                        w.configure(foreground=want)
-                except tk.TclError:
-                    pass
-            self._retint(w)
-
-    # ---------------------------------------------------------------- layout
-
-    def _build(self):
-        root, px = self.root, self.px
-        outer = self.outer = ttk.Frame(root, padding=(px(24), px(20), px(24), px(14)))
-        outer.pack(fill="both", expand=True)
-        # while the window edge is being dragged, the contents keep their size and are
-        # laid out again once, when the mouse button is let go
-        self._frozen = None          # (width, height) the contents are held at
-        self._unfreeze_job = None
-        self._last_size = None
-        root.bind("<Configure>", self._on_window_resize, add="+")
-        outer.columnconfigure(0, weight=1)
-        outer.rowconfigure(1, weight=1)
-
-        # title on the left, buttons on the right (the buttons drop below when narrow)
-        head = self.head_row = FlowRow(outer, bg=self.bg, gap=px(12), vgap=px(10))
-        head.grid(row=0, column=0, sticky="ew", pady=(0, px(14)))
-        titles = ttk.Frame(head)
-        ttk.Label(titles, text=APP, style="Title.TLabel").grid(row=0, column=0, sticky="w")
-        self.summary = self.tint(ttk.Label(titles, text="", style="Muted.TLabel"))
-        self.summary.grid(row=1, column=0, sticky="w", pady=(px(2), 0))
-        head.add(titles)
-        btns = ttk.Frame(head)
-        self.add_btn = ttk.Button(btns, text=" Add folder sync", style="Accent.TButton",
-                                  compound="left", command=self.new_sync)
-        self.add_btn.pack(side="left")
-        self.gear_btn = ttk.Button(btns, style="Icon.TButton", command=self.toggle_settings)
-        self.gear_btn.pack(side="left", padx=(px(8), 0))
-        head.add(btns, stretch=True, sticky="e")
-
-        # Scrollable list of pairs
-        body = ttk.Frame(outer)
-        body.grid(row=1, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=1)
-        body.rowconfigure(0, weight=1)
-        self.canvas = tk.Canvas(body, highlightthickness=0, borderwidth=0, background=self.bg)
-        self.scroll = ttk.Scrollbar(body, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self._on_yscroll)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.list = ttk.Frame(self.canvas)
-        self.list.columnconfigure(0, weight=1)
-        self._win = self.canvas.create_window(0, 0, window=self.list, anchor="nw")
-        self.list.bind("<Configure>", lambda e: self.canvas.configure(
-            scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>", self._on_canvas_resize)
-        root.bind_all("<MouseWheel>", self._wheel)
-        root.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-2, "units"))
-        root.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(2, "units"))
-
-        foot = ttk.Frame(outer)
-        foot.grid(row=2, column=0, sticky="ew", pady=(px(12), 0))
-        foot.columnconfigure(0, weight=1)
-        ttk.Button(foot, text="Sync now", command=lambda: self.ctrl.sync_now()).grid(
-            row=0, column=1)
-
-        self._build_settings()
-        self._theme_custom_widgets()
-        root.bind_all("<Button-1>", self._click_anywhere, add="+")
-        root.bind("<Escape>", lambda e: self.hide_settings())
-        root.bind("<FocusOut>", self._app_focus_out, add="+")
-        self._summary_override = None
-        self.drop_target(root, self.on_main_drop, self._main_hover)
-
-    def _on_canvas_resize(self, e) -> None:
-        """Keep the list as wide as the window."""
-        self.canvas.itemconfigure(self._win, width=e.width)
-
-    # ---- resizing the window: move the edge first, lay out once at the end ----------
-    SETTLE_MS = 250      # no mouse-button info (not Windows): lay out after this pause
-
-    def _mouse_down(self):
-        """Is the (primary) mouse button held down right now? None if we can't tell."""
-        if not IS_WIN:
-            return None
-        try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            vk = 0x02 if user32.GetSystemMetrics(23) else 0x01   # swapped buttons?
-            return bool(user32.GetAsyncKeyState(vk) & 0x8000)
-        except Exception:
-            return None
-
-    def _on_window_resize(self, e) -> None:
-        if e.widget is not self.root:
-            return
-        size = (e.width, e.height)
-        if size == self._last_size:
-            return                          # just moved, not resized
-        old, self._last_size = self._last_size, size
-        if old is None:
-            return
-        if self._frozen is None:
-            if self._mouse_down() is False:
-                return                      # maximise, snap, keyboard: lay out straight away
-            # hold the contents at their current size; Tk only paints the new edge
-            self._frozen = (self.outer.winfo_width(), self.outer.winfo_height())
-            self.outer.pack_forget()
-            self.outer.place(x=0, y=0, width=self._frozen[0], height=self._frozen[1])
-        self._schedule_unfreeze()
-
-    def _schedule_unfreeze(self) -> None:
-        if self._unfreeze_job is not None:
-            self.root.after_cancel(self._unfreeze_job)
-        down = self._mouse_down()
-        if down:                                     # still dragging: check again soon
-            self._unfreeze_job = self.root.after(40, self._schedule_unfreeze)
-        else:
-            delay = 0 if down is False else self.SETTLE_MS
-            self._unfreeze_job = self.root.after(delay, self._unfreeze)
-
-    def _unfreeze(self) -> None:
-        self._unfreeze_job = None
-        if self._frozen is None:
-            return
-        self._frozen = None
-        self.outer.place_forget()
-        self.outer.pack(fill="both", expand=True)
-
-    def _main_hover(self, over: bool) -> None:
-        self._summary_override = "Drop to add a folder sync" if over else None
-        self.refresh()
-
-    # ---------------------------------------------------------------- settings panel
-
-    def _build_settings(self):
-        px = self.px
-        self.flyout = Flyout(self.root, self.card_bg)
-        p = self.settings = ttk.Frame(self.flyout.win, style="Card.TFrame", padding=(px(18), px(14)))
-        p.pack(fill="both", expand=True)
-        p.columnconfigure(0, weight=1)
-        ttk.Label(p, text="Settings", style="Card.Name.TLabel").grid(
-            row=0, column=0, sticky="w", pady=(0, px(10)))
-
-        self.auto_var = tk.BooleanVar(value=get_autostart())
-        auto = ttk.Checkbutton(p, text="Start with Windows", style="Switch.TCheckbutton",
-                               variable=self.auto_var, command=self._toggle_autostart)
-        auto.grid(row=1, column=0, sticky="w")
-        if not IS_WIN:
-            auto.state(["disabled"])
-
-        ttk.Separator(p).grid(row=2, column=0, sticky="ew", pady=px(12))
-        self.tint(ttk.Label(p, text="Theme", style="Card.Body.TLabel"), "fg").grid(
-            row=3, column=0, sticky="w", pady=(0, px(8)))
-        self.theme_switch = SlideSwitch(
-            p, [("auto", "Auto"), ("light", "Light"), ("dark", "Dark")],
-            self.ctrl.config.theme, self.set_theme_pref, scale=self.S, font=self.f_body)
-        self.theme_switch.grid(row=4, column=0, sticky="w")
-
-        ttk.Separator(p).grid(row=5, column=0, sticky="ew", pady=px(12))
-        self.tint(ttk.Label(p, text="Folder sync configurations", style="Card.Body.TLabel"),
-                  "fg").grid(row=6, column=0, sticky="w", pady=(0, px(8)))
-        xb = tk.Frame(p, background=self.card_bg)
-        xb.grid(row=8, column=0, sticky="w")
-        ttk.Button(xb, text="Export", command=self.export_syncs).pack(side="left")
-        ttk.Button(xb, text="Import", command=self.import_syncs).pack(
-            side="left", padx=(px(8), 0))
-
-        ttk.Separator(p).grid(row=9, column=0, sticky="ew", pady=px(12))
-        ttk.Button(p, text="View activity log", command=self._activity_from_settings).grid(
-            row=10, column=0, sticky="ew")
-        self.tint(ttk.Label(p, text=f"{APP} {VERSION} - By Er.K.K.", style="Card.Muted.TLabel")).grid(
-            row=11, column=0, sticky="e", pady=(px(10), 0))
-
-    # ---------------------------------------------------------------- export / import
-
-    def export_syncs(self, path: str | None = None) -> bool:
-        """Save every folder sync (folders, sync types, options) and the theme to a file."""
-        jobs = self.ctrl.jobs()
-        if not jobs:
-            messagebox.showinfo(APP, "There are no folder syncs to export yet.", parent=self.root)
-            return False
-        if path is None:
-            path = filedialog.asksaveasfilename(
-                parent=self.root, title="Export folder sync configurations",
-                defaultextension=CONFIG_EXT,
-                initialfile=f"SyncMate folder syncs {time.strftime('%Y-%m-%d')}{CONFIG_EXT}",
-                filetypes=[("SyncMate configuration", f"*{CONFIG_EXT}"), ("All files", "*.*")])
-            if not path:
-                return False
-        try:
-            n = export_settings(path, self.ctrl.config, VERSION)
-        except OSError as e:
-            messagebox.showerror(APP, f"Couldn't save the file:\n{e.strerror or e}", parent=self.root)
-            return False
-        self.ctrl._log("", "info", f"Exported {n} folder sync{'s' if n != 1 else ''} to {path}")
-        self._flash_summary(f"Exported {n} folder sync{'s' if n != 1 else ''} to "
-                            f"{elide(os.path.basename(path), 40)}", 4000)
-        return True
-
-    def import_syncs(self, path: str | None = None, replace: bool | None = None) -> int:
-        """Load folder syncs from an exported file. Returns how many were added."""
-        if path is None:
-            path = filedialog.askopenfilename(
-                parent=self.root, title="Import folder sync configurations",
-                filetypes=[("SyncMate configuration", f"*{CONFIG_EXT}"),
-                           ("Older exports", "*.json"), ("All files", "*.*")])
-            if not path:
-                return 0
-        try:
-            cfg = read_settings_file(path)
-        except ValueError as e:
-            messagebox.showerror(APP, str(e), parent=self.root)
-            return 0
-        if not cfg.jobs:
-            messagebox.showinfo(APP, "That file has no folder syncs in it.", parent=self.root)
-            return 0
-        current = self.ctrl.jobs()
-        n = len(cfg.jobs)
-        if replace is None:
-            if current:
-                answer = messagebox.askyesnocancel(
-                    APP, f"Import {n} folder sync{'s' if n != 1 else ''}?\n\n"
-                         "Yes: replace your current folder syncs\n"
-                         "No: add them to your current folder syncs", parent=self.root)
-                if answer is None:
-                    return 0
-                replace = answer
-            else:
-                replace = True
-
-        taken = [] if replace else [p for j in current for p in [j.main] + [m.path for m in j.members]]
-        added, skipped, missing = [], [], []
-        for j in cfg.jobs:
-            folders = [j.main] + [m.path for m in j.members]
-            clash = any(_overlaps(a, b) for a in folders for b in taken) or any(
-                _overlaps(a, b) for i, a in enumerate(folders) for b in folders[i + 1:])
-            if clash or not j.members:
-                skipped.append(j.main)
-                continue
-            taken += folders
-            added.append(j)
-            missing += [p for p in folders if not os.path.isdir(p)]
-
-        if replace:
-            for j in current:
-                self.ctrl.remove_job(j.id)
-            if cfg.theme != self.ctrl.config.theme:
-                self.theme_switch.select(
-                    next(i for i, (v, _) in enumerate(self.theme_switch.options) if v == cfg.theme),
-                    notify=False)
-                self.set_theme_pref(cfg.theme)
-        for j in added:
-            job = self.ctrl.add_job(j.main, [Member(m.path, m.mode, m.versions, keep_days=m.keep_days)
-                                             for m in j.members])
-            if j.paused:
-                self.ctrl.set_paused(job.id, True)
-        self.ctrl._log("", "info", f"Imported {len(added)} folder sync"
-                                   f"{'s' if len(added) != 1 else ''} from {path}")
-        self.expanded, self._draft, self.card_sig = None, False, None
-        self.refresh()
-        note = [f"Imported {len(added)} folder sync{'s' if len(added) != 1 else ''}."]
-        if skipped:
-            note.append(f"Skipped {len(skipped)} that would overlap folders already being "
-                        "synced:\n" + "\n".join(skipped[:5]))
-        if missing:
-            note.append("These folders don't exist on this PC yet. Their syncs will start "
-                        "when the folders appear:\n" + "\n".join(missing[:8]))
-        if skipped or missing:
-            messagebox.showinfo(APP, "\n\n".join(note), parent=self.root)
-        else:
-            self._flash_summary(note[0], 4000)
-        return len(added)
-
-    def _activity_from_settings(self):
-        self.hide_settings()
-        self.show_activity()
-
-    def _icons(self) -> dict:
-        """This theme's icons. Made once per theme and kept: a widget still showing an
-        image that was thrown away breaks Tk's recolouring of the whole window."""
-        cache = self.__dict__.setdefault("_icon_cache", {})
-        if self.theme not in cache:
-            pal = PALETTE[self.theme]
-            line = self._line_height()
-            # the red "remove folder" button, as tall and wide as the other buttons
-            probe = ttk.Button(self.root, text="✕", width=3)
-            bw, bh = probe.winfo_reqwidth(), probe.winfo_reqheight()
-            probe.destroy()
-            cache[self.theme] = {
-                "gear": ImageTk.PhotoImage(gear(line, pal["fg"])),
-                "dots": ImageTk.PhotoImage(dots(line, pal["fg"])),
-                "plus": ImageTk.PhotoImage(plus(line, pal["on_thumb"])),
-                "remove": {k: ImageTk.PhotoImage(red_x(bw, bh, c)) for k, c in
-                           (("normal", "#C42B1C"), ("hover", "#AE2517"), ("pressed", "#962012"))},
-                # the badge at the end of each tree branch, in the Add folder sync button's
-                # colours: ⇄ two-way, → Main to folder, ← folder to Main
-                "badges": {kind: ImageTk.PhotoImage(
-                               sync_arrow(round(bh * 1.3), bh, kind, pal["thumb"],
-                                          pal["on_thumb"], vertical=False))
-                           for kind in ("both", "right", "left")},
-            }
-        return cache[self.theme]
-
-    def _theme_custom_widgets(self):
-        pal = PALETTE[self.theme]
-        icons = self._icons()
-        self._gear_img, self._dots_img = icons["gear"], icons["dots"]
-        self._plus_img, self._remove_imgs = icons["plus"], icons["remove"]
-        self._badge_imgs = icons["badges"]
-        if getattr(self, "_custom_painted", None) == self.theme:
-            return                      # already in this theme's colours: nothing to redraw
-        self._custom_painted = self.theme
-        if self.theme == "dark":
-            self.tooltip.set_colors("#2B2B2B", "#F2F2F2", "#4A4A4A")
-        else:
-            self.tooltip.set_colors("#FFFFFF", "#1C1C1C", "#C9CDD3")
-        self.gear_btn.configure(image=self._gear_img)
-        self.add_btn.configure(image=self._plus_img)
-        self.theme_switch.set_colors({"bg": self.card_bg, "track": pal["track"],
-                                      "thumb": pal["thumb"], "text": pal["muted"],
-                                      "text_on": pal["on_thumb"]})
-
-    def toggle_settings(self):
-        if self.flyout.shown:
-            self.hide_settings()
-            return
-        self.tooltip.hide()
-        b = self.gear_btn
-        self.flyout.show(lambda: (b.winfo_rootx() + b.winfo_width(),
-                                  b.winfo_rooty() + b.winfo_height() + self.px(6)))
-
-    def hide_settings(self, animate: bool = True):
-        self.flyout.hide(animate=animate)
-
-    def _click_anywhere(self, e):
-        """Close the settings panel when clicking somewhere else in the window."""
-        if not self.flyout.shown:
-            return
-        w = str(e.widget)
-        if w.startswith(str(self.flyout.win)) or w == str(self.gear_btn):
-            return
-        self.hide_settings()
-
-    def _app_focus_out(self, e=None):
-        """Close the settings panel when another app is brought to the front."""
-        def check():
-            try:
-                if str(self.root.tk.call("focus")) in ("", "none"):
-                    self.hide_settings()
-            except tk.TclError:
-                pass
-        self.root.after(60, check)
-
-    def _on_yscroll(self, lo, hi):
-        self.scroll.set(lo, hi)
-        if float(lo) <= 0 and float(hi) >= 1:
-            self.scroll.grid_remove()
-        else:
-            self.scroll.grid(row=0, column=1, sticky="ns", padx=(self.px(6), 0))
-
-    def _wheel(self, e):
-        if self.scroll.winfo_ismapped():
-            self.canvas.yview_scroll(int(-e.delta / 120) * 2, "units")
-
-    # ---------------------------------------------------------------- pair cards
-
+    # ---------------------------------------------------------------- cards
     def refresh(self):
         jobs = self.ctrl.jobs()
         snap = self.ctrl.snapshot()
         sig = [(j.id, j.main, tuple((m.id, m.path, m.mode, m.versions) for m in j.members))
-               for j in jobs] + (["new"] if self.draft_open else [])
-        if sig != self.card_sig:
-            self._rebuild(jobs)
+               for j in jobs] + (["new"] if self._draft else [])
+        if sig != self.card_sig and not self._animating():
+            self._rebuild(jobs)      # (never mid-animation: it would cut the slide short)
             self.card_sig = sig
-        for p in jobs:
-            st, card = snap.get(p.id), self.cards.get(p.id)
+        for j in jobs:
+            st, card = snap.get(j.id), self.cards.get(j.id)
             if st is not None and card is not None:
-                card.update(st, p)
+                card.update_status(st, j)
         self._update_summary(jobs, snap)
+        self._busy = any(st.state in ("syncing", "starting") for st in snap.values())
+
+    def _animating(self) -> bool:
+        return any(c.drawer.anim.state() == QAbstractAnimation.Running
+                   for c in self.cards.values()) or bool(getattr(self, "_folding", 0))
+
+    def _clear_list(self):
+        while self.list_box.count() > 1:
+            w = self.list_box.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
 
     def _rebuild(self, jobs):
         draft = self.cards.get("new")
-        kept = draft.values() if draft else None   # (main, [Member]) typed so far
-        for w in self.list.winfo_children():
-            w.destroy()
+        kept = draft.values() if draft else None
+        self.list.setUpdatesEnabled(False)
+        self._clear_list()
         self.cards = {}
-        row = 0
-        if self.draft_open:
-            card = self.cards["new"] = JobCard(self, self.list, row)
+        if self._draft:
+            card = self.cards["new"] = JobCard(self)
             if kept:
-                card.main.set(kept[0])
+                card.main_box.setText(kept[0])
                 for m in kept[1]:
-                    card._add_row(m)
-            row += 1
+                    card.add_row(m)
+            self.list_box.insertWidget(self.list_box.count() - 1, card)
         for j in jobs:
-            self.cards[j.id] = JobCard(self, self.list, row, j)
-            row += 1
+            card = self.cards[j.id] = JobCard(self, j)
+            self.list_box.insertWidget(self.list_box.count() - 1, card)
         if not self.cards:
-            self._empty_state()
+            self.list_box.insertWidget(0, self._empty_state())
         if self.expanded in self.cards:
-            self.cards[self.expanded].expand(reset=self.expanded != "new")
+            self.cards[self.expanded].expand(reset=self.expanded != "new", animate=False)
         else:
             self.expanded = None
+        self.list.setUpdatesEnabled(True)
 
-    def _empty_state(self):
-        px = self.px
-        box = ttk.Frame(self.list, padding=(0, px(50)))
-        box.grid(row=0, column=0)
-        self._big_icon = ImageTk.PhotoImage(make_icon("synced", px(72)))
-        ttk.Label(box, image=self._big_icon).pack(pady=(0, px(14)))
-        ttk.Label(box, text="Keep any two folders in sync", style="Name.TLabel").pack()
-        self.tint(ttk.Label(box, text="Pick a folder on your PC and one in OneDrive (or anywhere).\n"
-                                      "Changes flow both ways, automatically.\n\n"
-                                      "Tip: you can drag folders onto this window.",
-                            style="Muted.TLabel", justify="center")).pack(pady=(px(4), px(16)))
-        ttk.Button(box, text="Add your first folder sync", style="Accent.TButton",
-                   command=self.new_sync).pack()
+    def _empty_state(self) -> QWidget:
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 50, 0, 0)
+        v.setSpacing(4)
+        pic = QLabel()
+        pic.setPixmap(pil_to_pixmap(make_icon("synced", 144)).scaled(
+            72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        pic.setAlignment(Qt.AlignCenter)
+        v.addWidget(pic)
+        v.addSpacing(10)
+        t = label("Keep any two folders in sync", "name")
+        t.setAlignment(Qt.AlignCenter)
+        v.addWidget(t)
+        t = label("Pick a folder on your PC and one in OneDrive (or anywhere).\n"
+                  "Changes flow both ways, automatically.\n\n"
+                  "Tip: you can drag folders onto this window.", "body-muted")
+        t.setAlignment(Qt.AlignCenter)
+        v.addWidget(t)
+        v.addSpacing(12)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        b = button("Add your first folder sync", "primary")
+        b.clicked.connect(lambda: self.new_sync())
+        row.addWidget(b)
+        row.addStretch(1)
+        v.addLayout(row)
+        return box
 
-    # ---------------------------------------------------------------- expanding cards
+    def after_change(self):
+        """A job was changed or removed: the sync engine applies that a moment later, so
+        look again shortly to show the result as soon as it's in."""
+        self.card_sig = None
+        self.refresh()
+        for ms in (60, 180, 400):
+            QTimer.singleShot(ms, self.refresh)
 
-    @property
-    def draft_open(self) -> bool:
-        return self._draft
+    def remove_card(self, card: QWidget, jid: str):
+        """Fold a removed sync's card away, then forget it."""
+        self.ctrl.remove_job(jid)
+        a = QPropertyAnimation(card, b"maximumHeight", card)
+        a.setDuration(200)
+        a.setEasingCurve(QEasingCurve.InOutCubic)
+        a.setStartValue(card.height())
+        a.setEndValue(0)
+        self._folding = getattr(self, "_folding", 0) + 1
+
+        def done():
+            self._folding -= 1
+            card.hide()
+            self.after_change()
+        a.finished.connect(done)
+        a.start()
 
     def set_expanded(self, key) -> None:
-        """Expand one card in place (only one at a time); None collapses all."""
-        if self.expanded != key:
-            self._set_expanded(key)
-
-    def _set_expanded(self, key) -> None:
+        """Open one card (only one at a time); None closes them all."""
         if self.expanded == key:
             return
         if self.expanded == "new" and key != "new":
-            self._draft = False          # leaving the new-sync card discards it
-        old = self.cards.get(self.expanded)
-        if old is not None:
-            old.collapse()
+            old = self.cards.get("new")
+            self.expanded = None
+            if old is not None:
+                old.collapse(then=self.close_draft)
+        else:
+            old = self.cards.get(self.expanded)
+            if old is not None:
+                old.collapse()
         self.expanded = key
-        self.refresh()
         card = self.cards.get(key)
         if card is not None:
             card.expand()
-            self.ensure_visible(card.frame)
 
     def new_sync(self, prefill=()) -> None:
-        """Show the blank 'New folder sync' card at the top of the list."""
-        self.hide_settings(animate=False)
-        self._new_sync(prefill)
-
-    def _new_sync(self, prefill=()) -> None:
+        """Show the blank 'New folder sync' card at the top of the list, opening."""
+        self.flyout.hide()
         if not self._draft:
-            self._draft = True
-            self.set_expanded(None)
+            if self.expanded is not None and self.expanded in self.cards:
+                self.cards[self.expanded].collapse()
             self._draft = True
             self.expanded = "new"
             self.refresh()
+            card = self.cards["new"]
+            card.expand(reset=False)
         card = self.cards["new"]
-        card.expand(reset=False)
         if prefill:
             card.fill(prefill)
-        self.canvas.yview_moveto(0)
-        card.main_box.focus_set()
+        self.scroll.verticalScrollBar().setValue(0)
+        card.main_box.setFocus()
 
     def close_draft(self) -> None:
-        self._close_draft()
-
-    def _close_draft(self) -> None:
         self._draft = False
         if self.expanded == "new":
             self.expanded = None
         self.refresh()
 
-    def ensure_visible(self, widget) -> None:
-        self.root.update_idletasks()
-        total = max(1, self.list.winfo_height())
-        top = widget.winfo_y()
-        bottom = top + widget.winfo_height()
-        view_top, view_bottom = (f * total for f in self.canvas.yview())
-        view_h = view_bottom - view_top
-        if bottom > view_bottom:
-            # show the whole card if it fits, otherwise its top (the header stays visible)
-            self.canvas.yview_moveto((top if bottom - top > view_h else bottom - view_h) / total)
-        elif top < view_top:
-            self.canvas.yview_moveto(top / total)
+    def keep_visible(self, card: QWidget) -> None:
+        """While a card opens, scroll so it stays in view (its top never leaves the view)."""
+        if card.parent() is None:
+            return
+        sb = self.scroll.verticalScrollBar()
+        view = self.scroll.viewport().height()
+        top = card.y()
+        bottom = top + card.height()
+        if bottom > sb.value() + view:
+            sb.setValue(min(top, bottom - view))
+        elif top < sb.value():
+            sb.setValue(top)
 
+    # ---------------------------------------------------------------- checks
     def prepare_folders(self, main: str, members: list, ignore=None):
         """Check a job's folders can be synced; create ones that don't exist yet.
         Returns an error message, or None if all is well."""
@@ -940,21 +614,22 @@ class App:
             return
         empty = job.main if st.empty_side == 0 else m.path
         other = m.path if st.empty_side == 0 else job.main
-        if messagebox.askyesno(
-                APP, f"{empty} is empty.\n\nDelete the same files in\n{other}?\n\n"
-                     "They'll go to the Recycle Bin (or old versions).", icon="warning",
-                parent=self.root):
+        if QMessageBox.warning(self, APP, f"{empty} is empty.\n\nDelete the same files in\n"
+                                          f"{other}?\n\nThey'll go to the Recycle Bin (or old "
+                                          "versions).", QMessageBox.Yes | QMessageBox.No,
+                               QMessageBox.No) == QMessageBox.Yes:
             self.ctrl.resolve_empty(jid, True)
 
-    def _update_summary(self, pairs, snap):
-        if not pairs:
+    # ---------------------------------------------------------------- summary
+    def _update_summary(self, jobs, snap):
+        if not jobs:
             text = "Add a folder sync and SyncMate keeps your folders identical."
         else:
             overall = self.ctrl.overall()
             states = {st.state for st in snap.values()}
             if overall == "syncing" and states.isdisjoint({"syncing", "starting"}):
                 overall = "waiting"
-            n = len(pairs)
+            n = len(jobs)
             text = {
                 "synced": f"{n} folder sync{'s' if n > 1 else ''} · everything is in sync",
                 "syncing": "Syncing changes…",
@@ -962,96 +637,250 @@ class App:
                 "paused": "All syncing is paused",
                 "error": "Something needs your attention",
             }[overall]
-        if getattr(self, "_summary_override", None):
+        if self._summary_override:
             text = self._summary_override
-        if str(self.summary.cget("text")) != text:
-            self.summary.configure(text=text)
+        if self.summary.text() != text:
+            self.summary.setText(text)
         if self.tray is not None:
-            state = self.ctrl.overall() if pairs else "synced"
+            state = self.ctrl.overall() if jobs else "synced"
             if state != getattr(self, "_tray_state", None):
                 self._tray_state = state
-                self.tray.icon = make_icon(state, 64)
-                self.tray.title = f"{APP} — {text}"
+                self.tray.setIcon(app_icon(state))
+            self.tray.setToolTip(f"{APP} — {text}")
+
+    def flash(self, text: str, ms: int = 2500):
+        self._summary_override = text
+        self.refresh()
+
+        def clear():
+            if self._summary_override == text:
+                self._summary_override = None
+                self.refresh()
+        QTimer.singleShot(ms, clear)
+
+    # ---------------------------------------------------------------- drag & drop
+    def dragEnterEvent(self, e):              # noqa: N802
+        if dropped_folders(e.mimeData()):
+            e.acceptProposedAction()
+            self._summary_override = "Drop to add a folder sync"
+            self.refresh()
+
+    def dragLeaveEvent(self, e):              # noqa: N802
+        self._summary_override = None
+        self.refresh()
+
+    def dropEvent(self, e):                   # noqa: N802
+        self._summary_override = None
+        folders = [p for p in dropped_folders(e.mimeData()) if os.path.isdir(p)]
+        if not folders:
+            self.flash("Drop folders, not files, to add a folder sync.")
+            return
+        e.acceptProposedAction()
+        self.new_sync(prefill=folders)
+
+    # ---------------------------------------------------------------- settings
+    def toggle_settings(self):
+        if self.flyout.isVisible():
+            self.flyout.hide()
+            return
+        if time.monotonic() - self.flyout.hidden_at < 0.25:
+            return              # this click is the one that just closed it
+        self.flyout.autostart.blockSignals(True)
+        self.flyout.autostart.setChecked(get_autostart())
+        self.flyout.autostart.blockSignals(False)
+        self.flyout.theme.set_value(self.ctrl.config.theme)
+        self.flyout.popup(self.gear)
+
+    def set_autostart(self, on: bool):
+        try:
+            set_autostart(on)
+        except OSError as e:
+            QMessageBox.critical(self, APP, f"Couldn't change the startup setting:\n{e}")
+            self.flyout.autostart.setChecked(get_autostart())
+
+    @staticmethod
+    def _heal_autostart():
+        """If Start with Windows is on, point it at whichever SyncMate.exe is running now."""
+        try:
+            if get_autostart():
+                set_autostart(True)
+        except OSError:
+            pass
 
     def show_activity(self):
-        if self.activity_win and self.activity_win.winfo_exists():
-            self.activity_win.lift()
-            return
-        self.activity_win = ActivityWindow(self)
+        if self.activity_win is None:
+            self.activity_win = ActivityWindow(self)
+        self.activity_win.show()
+        self.activity_win.raise_()
+        self.activity_win.activateWindow()
+        dark_titlebar(self.activity_win, self.theme == "dark")
 
-    def _toggle_autostart(self):
+    # ---------------------------------------------------------------- export / import
+    def export_syncs(self, path: str | None = None) -> bool:
+        """Save every folder sync (folders, sync types, options) and the theme to a file."""
+        if not self.ctrl.jobs():
+            QMessageBox.information(self, APP, "There are no folder syncs to export yet.")
+            return False
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export folder sync configurations",
+                f"SyncMate folder syncs {time.strftime('%Y-%m-%d')}{CONFIG_EXT}",
+                f"SyncMate configuration (*{CONFIG_EXT});;All files (*.*)")
+            if not path:
+                return False
+            if not os.path.splitext(path)[1]:
+                path += CONFIG_EXT
         try:
-            set_autostart(self.auto_var.get())
+            n = export_settings(path, self.ctrl.config, VERSION)
         except OSError as e:
-            messagebox.showerror(APP, f"Couldn't change the startup setting:\n{e}")
-            self.auto_var.set(get_autostart())
+            QMessageBox.critical(self, APP, f"Couldn't save the file:\n{e.strerror or e}")
+            return False
+        self.ctrl._log("", "info", f"Exported {n} folder sync{'s' if n != 1 else ''} to {path}")
+        self.flash(f"Exported {n} folder sync{'s' if n != 1 else ''} to "
+                   f"{elide(os.path.basename(path), 40)}", 4000)
+        return True
+
+    def import_syncs(self, path: str | None = None, replace: bool | None = None) -> int:
+        """Load folder syncs from an exported file. Returns how many were added."""
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Import folder sync configurations", "",
+                f"SyncMate configuration (*{CONFIG_EXT});;Older exports (*.json);;All files (*.*)")
+            if not path:
+                return 0
+        try:
+            cfg = read_settings_file(path)
+        except ValueError as e:
+            QMessageBox.critical(self, APP, str(e))
+            return 0
+        if not cfg.jobs:
+            QMessageBox.information(self, APP, "That file has no folder syncs in it.")
+            return 0
+        current = self.ctrl.jobs()
+        n = len(cfg.jobs)
+        if replace is None:
+            if current:
+                box = QMessageBox(QMessageBox.Question, APP,
+                                  f"Import {n} folder sync{'s' if n != 1 else ''}?", parent=self)
+                box.setInformativeText("Replace your current folder syncs, or add these to them?")
+                rep = box.addButton("Replace", QMessageBox.AcceptRole)
+                add = box.addButton("Add", QMessageBox.AcceptRole)
+                box.addButton(QMessageBox.Cancel)
+                box.exec()
+                if box.clickedButton() not in (rep, add):
+                    return 0
+                replace = box.clickedButton() is rep
+            else:
+                replace = True
+
+        taken = [] if replace else [p for j in current for p in [j.main] + [m.path for m in j.members]]
+        added, skipped, missing = [], [], []
+        for j in cfg.jobs:
+            folders = [j.main] + [m.path for m in j.members]
+            clash = any(_overlaps(a, b) for a in folders for b in taken) or any(
+                _overlaps(a, b) for i, a in enumerate(folders) for b in folders[i + 1:])
+            if clash or not j.members:
+                skipped.append(j.main)
+                continue
+            taken += folders
+            added.append(j)
+            missing += [p for p in folders if not os.path.isdir(p)]
+
+        if replace:
+            for j in current:
+                self.ctrl.remove_job(j.id)
+            if cfg.theme != self.ctrl.config.theme:
+                self.flyout.theme.set_value(cfg.theme)
+                self.set_theme_pref(cfg.theme)
+        for j in added:
+            job = self.ctrl.add_job(j.main, [Member(m.path, m.mode, m.versions, keep_days=m.keep_days)
+                                             for m in j.members])
+            if j.paused:
+                self.ctrl.set_paused(job.id, True)
+        self.ctrl._log("", "info", f"Imported {len(added)} folder sync"
+                                   f"{'s' if len(added) != 1 else ''} from {path}")
+        self.expanded, self._draft, self.card_sig = None, False, None
+        self.refresh()
+        note = [f"Imported {len(added)} folder sync{'s' if len(added) != 1 else ''}."]
+        if skipped:
+            note.append(f"Skipped {len(skipped)} that would overlap folders already being "
+                        "synced:\n" + "\n".join(skipped[:5]))
+        if missing:
+            note.append("These folders don't exist on this PC yet. Their syncs will start "
+                        "when the folders appear:\n" + "\n".join(missing[:8]))
+        if skipped or missing:
+            QMessageBox.information(self, APP, "\n\n".join(note))
+        else:
+            self.flash(note[0], 4000)
+        return len(added)
 
     # ---------------------------------------------------------------- window & tray
-
-    def show(self):
-        self.root.deiconify()
-        dark_titlebar(self.root, self.theme == "dark")
-        self.root.lift()
-        self.root.focus_force()
-
-    def hide(self):
-        if self.tray is None:
-            self.quit()
+    def _start_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        self.root.withdraw()
+        tray = self.tray = QSystemTrayIcon(app_icon(), self)
+        menu = QMenu()
+        menu.addAction("Open SyncMate", self.show_window)
+        menu.addAction("Sync now", lambda: self.ctrl.sync_now())
+        self.pause_all = menu.addAction("Pause all", self._toggle_all)
+        menu.addSeparator()
+        menu.addAction("Quit", self.quit)
+        menu.aboutToShow.connect(self._tray_menu_text)
+        tray.setContextMenu(menu)
+        self._tray_menu = menu
+        tray.activated.connect(lambda r: self.show_window()
+                               if r in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
+        tray.setToolTip(APP)
+        tray.show()
+
+    def _all_paused(self) -> bool:
+        jobs = self.ctrl.jobs()
+        return bool(jobs) and all(j.paused for j in jobs)
+
+    def _tray_menu_text(self):
+        self.pause_all.setText("Resume all" if self._all_paused() else "Pause all")
+
+    def _toggle_all(self):
+        pause = not self._all_paused()
+        for j in self.ctrl.jobs():
+            self.ctrl.set_paused(j.id, pause)
+
+    def show_window(self):
+        self.show()
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        dark_titlebar(self, self.theme == "dark")
+
+    def closeEvent(self, e):                  # noqa: N802
+        if self.tray is None or getattr(self, "_quitting", False):
+            self._shutdown()
+            e.accept()
+            return
+        e.ignore()
+        self.hide()
         if not self.ctrl.config.tray_hint_shown:
             self.ctrl.remember(tray_hint_shown=True)
-            try:
-                self.tray.notify("SyncMate keeps syncing in the background. "
-                                 "Open it again from the tray icon.", APP)
-            except Exception:
-                pass
+            self.tray.showMessage(APP, "SyncMate keeps syncing in the background. "
+                                       "Open it again from the tray icon.", app_icon(), 5000)
+
+    def _shutdown(self):
+        if getattr(self, "_down", False):
+            return
+        self._down = True
+        self.timer.stop()
+        if self.tray is not None:
+            self.tray.hide()
+        self.ctrl.stop()
+        self.qapp.quit()
 
     def quit(self):
-        if self.tray is not None:
-            try:
-                self.tray.stop()
-            except Exception:
-                pass
-        self.ctrl.stop()
-        self.root.destroy()
-
-    def _start_tray(self):
-        try:
-            import pystray
-        except Exception:
-            return
-        later = self.q.put
-
-        def all_paused(_=None):
-            ps = self.ctrl.jobs()
-            return bool(ps) and all(p.paused for p in ps)
-
-        def toggle_all():
-            pause = not all_paused()
-            for p in self.ctrl.jobs():
-                self.ctrl.set_paused(p.id, pause)
-
-        menu = pystray.Menu(
-            pystray.MenuItem("Open SyncMate", lambda: later(self.show), default=True),
-            pystray.MenuItem("Sync now", lambda: self.ctrl.sync_now()),
-            pystray.MenuItem(lambda item: "Resume all" if all_paused() else "Pause all",
-                             lambda: toggle_all()),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", lambda: later(self.quit)),
-        )
-        try:
-            self.tray = pystray.Icon(APP, make_icon("synced", 64), APP, menu)
-            self.tray.run_detached()
-        except Exception:
-            self.tray = None
+        self._quitting = True
+        self.close()
+        self._shutdown()
 
     def _poll(self):
-        try:
-            while True:
-                self.q.get_nowait()()
-        except queue.Empty:
-            pass
         if os.path.exists(QUIT_FLAG):
             try:
                 os.remove(QUIT_FLAG)
@@ -1064,76 +893,33 @@ class App:
                 os.remove(SHOW_FLAG)
             except OSError:
                 pass
-            self.show()
-        now = time.monotonic()
-        if now - getattr(self, "_last_theme_check", 0) > 3:
-            self._last_theme_check = now
-            t = self._wanted_theme()
-            if t != self.theme:
-                self.switch_theme(t)
+            self.show_window()
         self.refresh()
-        if self.activity_win and self.activity_win.winfo_exists():
+        if self.activity_win is not None and self.activity_win.isVisible():
             self.activity_win.refresh()
-        busy = any(st.state in ("syncing", "starting") for st in self.ctrl.snapshot().values())
-        self.root.after(200 if busy else 600, self._poll)
-
-    def run(self):
-        self.root.mainloop()
+        self.timer.setInterval(200 if self._busy else 600)
 
 
-class ActivityWindow:
-    def __init__(self, app: App):
-        self.app = app
-        px = app.px
-        self.win = win = tk.Toplevel(app.root)
-        win.withdraw()                      # fades in once it is fully drawn
-        win.title("SyncMate — Activity")
-        win.geometry(f"{px(720)}x{px(420)}")
-        f = ttk.Frame(win, padding=px(16))
-        f.pack(fill="both", expand=True)
-        f.columnconfigure(0, weight=1)
-        f.rowconfigure(1, weight=1)
-        top = ttk.Frame(f)
-        top.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, px(10)))
-        ttk.Label(top, text="Activity", style="Title.TLabel").pack(side="left")
-        ttk.Button(top, text="Open log file", command=lambda: open_folder(data_dir())).pack(
-            side="right")
-        self.tree = ttk.Treeview(f, columns=("time", "what"), show="headings")
-        self.tree.heading("time", text="Time", anchor="w")
-        self.tree.heading("what", text="What happened", anchor="w")
-        self.tree.column("time", width=px(90), stretch=False)
-        self.tree.column("what", width=px(560))
-        self.tree.tag_configure("error", foreground=PALETTE[app.theme]["error"])
-        self.tree.tag_configure("warn", foreground=COLORS["syncing"])
-        sb = ttk.Scrollbar(f, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=sb.set)
-        self.tree.grid(row=1, column=0, sticky="nsew")
-        sb.grid(row=1, column=1, sticky="ns")
-        self._seen = None
-        self.refresh()
-        fade_in(win, 160)
-        dark_titlebar(win, app.theme == "dark")
-
-    def winfo_exists(self):
-        try:
-            return bool(self.win.winfo_exists())
-        except tk.TclError:
-            return False
-
-    def lift(self):
-        self.win.deiconify()
-        self.win.lift()
-
-    def refresh(self):
-        items = list(self.app.ctrl.activity)
-        head = items[0] if items else None
-        if head == self._seen:
-            return
-        self._seen = head
-        self.tree.delete(*self.tree.get_children())
-        for t, _pid, level, msg in items:
-            self.tree.insert("", "end", values=(time.strftime("%H:%M:%S", time.localtime(t)), msg),
-                             tags=(level,))
+# ============================================================== start
+def make_app(argv=None) -> QApplication:
+    if IS_WIN:
+        try:   # own taskbar button and icon, not python's
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ErKK.SyncMate")
+        except Exception:
+            pass
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+    app = QApplication.instance() or QApplication(argv or sys.argv)
+    app.setApplicationName(APP)
+    app.setStyle("Fusion")
+    font = QFont()
+    font.setFamilies(theme.FONT_FAMILIES)
+    font.setPointSize(10)
+    app.setFont(font)
+    app.setQuitOnLastWindowClosed(False)
+    app.setWindowIcon(app_icon())
+    return app
 
 
 def main():
@@ -1151,11 +937,13 @@ def main():
             os.remove(flag)
         except OSError:
             pass
-    dpi_aware()
+    app = make_app()
     ctrl = Controller()
     ctrl.start()
     try:
-        App(ctrl, start_hidden=args.background).run()
+        win = MainWindow(app, ctrl, start_hidden=args.background)
+        app.exec()
+        del win
     finally:
         if ctrl._thread.is_alive():
             ctrl.stop()
