@@ -10,8 +10,13 @@ moving it.
    (or from python.org; tick **Add python.exe to PATH**).
 2. Double-click **`build.bat`**. A couple of minutes later `SyncMate.exe` appears
    in this folder.
+
+   To **update** later, just run `build.bat` again. It closes the running SyncMate
+   (letting it finish any copy in progress), deletes the old version, builds the new
+   one, and starts it again if it was running.
 3. Run `SyncMate.exe`, click **Add folder pair**, pick the two folders, and you're done.
    Turn on **Start with Windows** so it runs in the background from then on.
+   The **Theme** switch at the bottom picks Auto (follows Windows), Light or Dark.
 
 You can also run it without building: `py app.py`
 (after `py -m pip install -r requirements.txt`).

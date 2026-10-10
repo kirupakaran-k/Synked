@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 1.0.6 - build.bat closes and replaces the app
+
+build.bat closes a running SyncMate cleanly, deletes the old version, builds and restarts it; leftover temp files from a forced close are cleaned up.
+
 ## 1.0.5 - Pale blue logo background
 
 Logo tile changed from cream to pale blue.

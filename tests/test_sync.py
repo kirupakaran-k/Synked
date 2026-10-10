@@ -354,3 +354,18 @@ def test_changes_while_app_closed(tmp_path, monkeypatch):
     assert wait_for(lambda: os.path.exists(f"{L}/added.txt") and not os.path.exists(f"{L}/gone.txt"))
     assert bin_.names() == ["gone.txt"]
     c.stop()
+
+
+def test_stale_temp_files_are_cleaned_up(env, monkeypatch):
+    """A half-copied temp file left behind by a killed SyncMate is removed once it's an
+    hour old; a recent one (a copy that might still be in progress) is left alone."""
+    import engine
+    temp = f"{env.R}/.syncmate-dead0001.tmp"
+    write(temp, "half")
+    env.sync()
+    assert os.path.exists(temp)                      # fresh: kept
+    real_time = engine.time.time
+    monkeypatch.setattr(engine.time, "time", lambda: real_time() + 7200)  # two hours later
+    env.sync()
+    assert not os.path.exists(temp)                  # stale: removed
+    assert tree(env.L) == {}                         # and never synced to the other side

@@ -98,6 +98,9 @@ def scan(root: str, rel: str = "") -> dict:
             continue  # vanished mid-scan; the watcher will tell us about it
         with it:
             for e in it:
+                if e.name.startswith(TEMP_PREFIX) and e.name.endswith(".tmp"):
+                    _remove_stale_temp(e.path)
+                    continue
                 if is_ignored(e.name):
                     continue
                 erel = os.path.join(drel, e.name) if drel else e.name
@@ -111,6 +114,15 @@ def scan(root: str, rel: str = "") -> dict:
                 if s[0]:
                     stack.append((e.path, erel))
     return out
+
+
+def _remove_stale_temp(path: str) -> None:
+    """Delete a half-copied temp file left behind if SyncMate was killed mid-copy."""
+    try:
+        if time.time() - os.stat(path).st_ctime > 3600:
+            os.remove(path)
+    except OSError:
+        pass
 
 
 class Busy(OSError):

@@ -27,7 +27,8 @@ except Exception:  # pragma: no cover
 
 IS_WIN = os.name == "nt"
 APP = "SyncMate"
-SHOW_FLAG = os.path.join(data_dir(), "show.flag")
+SHOW_FLAG = os.path.join(data_dir(), "show.flag")   # "please show your window"
+QUIT_FLAG = os.path.join(data_dir(), "quit.flag")   # "please quit" (used by build.bat)
 ONEDRIVE = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or ""
 
 PALETTE = {
@@ -44,15 +45,15 @@ STATE_COLOR = {
 
 # ============================================================== Windows helpers
 
-def single_instance() -> bool:
-    """True if we're the only SyncMate running. Otherwise ask the running one to show itself."""
+def single_instance(signal: str = SHOW_FLAG) -> bool:
+    """True if we're the only SyncMate running. Otherwise pass `signal` to the running one."""
     if not IS_WIN:
         return True
     import ctypes
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     single_instance.handle = k32.CreateMutexW(None, False, "Local\\SyncMate.SingleInstance")
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
-        open(SHOW_FLAG, "w").close()
+        open(signal, "w").close()
         return False
     return True
 
@@ -581,6 +582,13 @@ class App:
                 self.q.get_nowait()()
         except queue.Empty:
             pass
+        if os.path.exists(QUIT_FLAG):
+            try:
+                os.remove(QUIT_FLAG)
+            except OSError:
+                pass
+            self.quit()
+            return
         if os.path.exists(SHOW_FLAG):
             try:
                 os.remove(SHOW_FLAG)
@@ -765,9 +773,18 @@ class ActivityWindow:
 def main():
     ap = argparse.ArgumentParser(prog=APP)
     ap.add_argument("--background", action="store_true", help="start hidden in the tray")
+    ap.add_argument("--quit", action="store_true", help="ask a running SyncMate to close")
     args = ap.parse_args()
+    if args.quit:
+        single_instance(QUIT_FLAG)  # signals the running copy, if there is one
+        return
     if not single_instance():
         return
+    for flag in (SHOW_FLAG, QUIT_FLAG):  # leftovers from a previous run
+        try:
+            os.remove(flag)
+        except OSError:
+            pass
     dpi_aware()
     ctrl = Controller()
     ctrl.start()

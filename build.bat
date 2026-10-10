@@ -1,8 +1,9 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0"
 title Building SyncMate
 
+rem ---------------------------------------------------------------- find Python
 set "PY="
 where py >nul 2>nul && set "PY=py -3"
 if not defined PY where python >nul 2>nul && set "PY=python"
@@ -14,18 +15,48 @@ if not defined PY (
   exit /b 1
 )
 
-echo [1/4] Creating a private Python environment...
+rem ---------------------------------------------------------------- 1. close the running app
+echo [1/6] Closing SyncMate if it's running...
+set "WASRUNNING="
+call :running && set "WASRUNNING=1"
+if not defined WASRUNNING goto :closed
+rem Ask it to finish what it's doing and quit (it checks for this file every second).
+if not exist "%APPDATA%\SyncMate" mkdir "%APPDATA%\SyncMate"
+type nul > "%APPDATA%\SyncMate\quit.flag"
+for /L %%i in (1,1,10) do (
+  call :running || goto :closed
+  >nul ping -n 2 127.0.0.1
+)
+echo       It didn't close by itself, so forcing it to close.
+taskkill /F /IM SyncMate.exe >nul 2>nul
+>nul ping -n 3 127.0.0.1
+:closed
+
+rem ---------------------------------------------------------------- 2. delete the old version
+echo [2/6] Deleting the old version...
+if exist SyncMate.exe del /f /q SyncMate.exe
+if exist SyncMate.exe (
+  echo       Couldn't delete SyncMate.exe. Close it ^(tray icon ^> Quit^) and run this again.
+  goto :fail
+)
+if exist dist rmdir /s /q dist
+if exist build rmdir /s /q build
+if exist SyncMate.spec del /f /q SyncMate.spec
+if exist syncmate.ico del /f /q syncmate.ico
+
+rem ---------------------------------------------------------------- 3-6. build the new one
+echo [3/6] Preparing a private Python environment...
 if not exist .venv %PY% -m venv .venv || goto :fail
 call .venv\Scripts\activate.bat || goto :fail
 
-echo [2/4] Installing libraries...
+echo [4/6] Installing libraries...
 python -m pip install --quiet --upgrade pip
 python -m pip install --quiet -r requirements.txt pyinstaller || goto :fail
 
-echo [3/4] Drawing the icon...
-python icon.py || goto :fail
+echo [5/6] Drawing the icon...
+python icon.py >nul || goto :fail
 
-echo [4/4] Building SyncMate.exe (takes a minute)...
+echo [6/6] Building SyncMate.exe (takes a minute)...
 pyinstaller --noconfirm --clean --onefile --windowed --name SyncMate --icon syncmate.ico ^
   --collect-data sv_ttk ^
   --hidden-import pystray._win32 ^
@@ -36,7 +67,12 @@ pyinstaller --noconfirm --clean --onefile --windowed --name SyncMate --icon sync
 
 copy /y dist\SyncMate.exe SyncMate.exe >nul || goto :fail
 echo.
-echo Done!  SyncMate.exe is ready in this folder.
+echo Done!  The new SyncMate.exe is ready in this folder.
+
+if defined WASRUNNING (
+  echo Starting the new SyncMate...
+  start "" "%~dp0SyncMate.exe"
+)
 pause
 exit /b 0
 
@@ -45,3 +81,8 @@ echo.
 echo Build failed. See build.log for details.
 pause
 exit /b 1
+
+rem ---------------------------------------------------------------- helper
+:running
+tasklist /FI "IMAGENAME eq SyncMate.exe" /NH 2>nul | find /I "SyncMate.exe" >nul
+exit /b %errorlevel%
