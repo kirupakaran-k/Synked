@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 1.0.4 - Blue retro logo
+
+New logo: retro 70s-style striped sync loop in blues on a cream tile; status shown as a dot on the tray icon.
+
 ## 1.0.3 - Light, dark and auto theme switch
 
 Theme switch (Auto / Light / Dark) in the bottom bar; the choice is remembered.

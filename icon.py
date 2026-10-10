@@ -1,38 +1,69 @@
-"""Draws the SyncMate icon (two chasing arrows on a coloured disc) with Pillow."""
+"""Draws the SyncMate icon: a retro striped sync loop in blues, on a cream tile.
+
+The logo itself never changes; a small coloured dot in the corner shows the status
+(no dot = everything is in sync).
+"""
 from __future__ import annotations
 
 import math
 
 from PIL import Image, ImageDraw
 
+# Status colours (also used for the dots in the main window).
 COLORS = {
-    "synced": "#2F6FEB",
+    "synced": "#2F6FB0",
     "syncing": "#E59E1A",
     "paused": "#8B929C",
     "error": "#D64541",
 }
 
+CREAM = "#F3E6CF"
+STRIPES = ("#1F3A5F", "#2F6FB0", "#7DB8E3")  # outer → inner: navy, blue, sky
+ARROW = "#1F3A5F"
+
+_S = 1024
+_cache: dict = {}
+
+
+def _logo() -> Image.Image:
+    if "logo" in _cache:
+        return _cache["logo"]
+    S = _S
+    im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.rounded_rectangle((24, 24, S - 24, S - 24), radius=int(S * 0.22), fill=CREAM)
+
+    c, w = S / 2, 58
+    radii = (330, 272, 214)
+    r_in, r_out = radii[-1] - w / 2, radii[0] + w / 2
+    for start in (205, 25):          # two arcs, each with an arrowhead at its end
+        end = start + 118
+        for col, r in zip(STRIPES, radii):
+            d.arc((c - r, c - r, c + r, c + r), start, end, fill=col, width=w)
+        a = math.radians(end)
+        spread = (r_out - r_in) * 0.22
+        b_in, b_out = r_in - spread, r_out + spread
+        rm = (r_in + r_out) / 2
+        t = a + math.pi / 2           # clockwise direction of travel
+        d.polygon([
+            (c + b_in * math.cos(a), c + b_in * math.sin(a)),
+            (c + b_out * math.cos(a), c + b_out * math.sin(a)),
+            (c + rm * math.cos(a) + 115 * math.cos(t), c + rm * math.sin(a) + 115 * math.sin(t)),
+        ], fill=ARROW)
+    _cache["logo"] = im
+    return im
+
 
 def make_icon(state: str = "synced", size: int = 64) -> Image.Image:
-    s = 512  # draw large, then scale down for smooth edges
-    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.ellipse((8, 8, s - 8, s - 8), fill=COLORS.get(state, COLORS["synced"]))
-
-    c, r, w = s / 2, s * 0.25, int(s * 0.085)
-    box = (c - r, c - r, c + r, c + r)
-    for start in (200, 20):  # two arcs, each ~125 degrees, with an arrow head
-        end = start + 125
-        d.arc(box, start, end, fill="white", width=w)
-        a = math.radians(end)
-        tip_x, tip_y = c + r * math.cos(a), c + r * math.sin(a)
-        tang = a + math.pi / 2  # direction of travel (clockwise in screen coords)
-        h = s * 0.13
-        p1 = (tip_x + h * 0.95 * math.cos(tang), tip_y + h * 0.95 * math.sin(tang))
-        p2 = (tip_x + h * 0.6 * math.cos(a), tip_y + h * 0.6 * math.sin(a))
-        p3 = (tip_x - h * 0.6 * math.cos(a), tip_y - h * 0.6 * math.sin(a))
-        d.polygon([p1, p2, p3], fill="white")
-    return img.resize((size, size), Image.LANCZOS)
+    """The logo at `size` px, with a status dot unless everything is in sync."""
+    im = _logo().copy()
+    if state != "synced" and state in COLORS:
+        d = ImageDraw.Draw(im)
+        r, cx, cy = _S * 0.21, _S * 0.77, _S * 0.77
+        ring = _S * 0.05
+        d.ellipse((cx - r - ring, cy - r - ring, cx + r + ring, cy + r + ring), fill="white")
+        d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=COLORS[state])
+    return im.resize((size, size), Image.LANCZOS)
 
 
 def save_ico(path: str = "syncmate.ico") -> None:
