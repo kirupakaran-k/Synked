@@ -1,0 +1,6 @@
+watchdog>=4.0
+pystray>=0.19
+Pillow>=10.0
+Send2Trash>=1.8.2
+sv-ttk>=2.6
+darkdetect>=0.8

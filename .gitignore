@@ -1,0 +1,14 @@
+# Build output (build.bat puts the app in "build <version>" folders)
+build */
+build/
+dist/
+*.exe
+*.spec
+*.ico
+build.log
+exe_info.txt
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
