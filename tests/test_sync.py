@@ -574,29 +574,34 @@ def test_live_edit_job_add_and_remove_folders(job, tmp_path):
     assert bin_.items == []                                     # nothing re-merged or binned
 
 
-# ------------------------------------------------------------------ settings folder
+# ------------------------------------------------------------------ export / import
 
-def test_settings_folder_can_be_chosen(tmp_path, monkeypatch):
-    import store
-    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
-    assert store.data_dir() == store.app_dir() and store.chosen_data_dir() is None
-    elsewhere = tmp_path / "My settings"
-    elsewhere.mkdir()
-    store.set_data_dir(str(elsewhere))
-    assert store.data_dir() == str(elsewhere) and store.data_dir_problem() is None
-    Config(theme="dark").save()                                  # saves into the chosen folder
-    assert (elsewhere / "config.json").exists()
-    store.set_data_dir(None)                                     # back to the default
-    assert store.data_dir() == store.app_dir()
+def test_export_and_import_round_trip(tmp_path):
+    import json
+    from store import Job, Member, export_settings, read_settings_file
+    cfg = Config(theme="dark", jobs=[
+        Job(main="D:/Final project", paused=True,
+            members=[Member("E:/Backup", "update", True), Member("F:/Copy", "mirror")])])
+    out = tmp_path / "SyncMate folder syncs.json"
+    assert export_settings(str(out), cfg, "2.2") == 1
+    raw = json.loads(out.read_text(encoding="utf-8"))
+    assert raw["kind"] == "SyncMate folder syncs" and raw["app_version"] == "2.2"
+    assert "id" not in raw["jobs"][0]                         # ids are this PC's business
+    back = read_settings_file(str(out))
+    j = back.jobs[0]
+    assert back.theme == "dark" and j.main == "D:/Final project" and j.paused
+    assert [(m.path, m.mode, m.versions) for m in j.members] == [
+        ("E:/Backup", "update", True), ("F:/Copy", "mirror", False)]
+    assert j.id != cfg.jobs[0].id                             # fresh ids on import
 
 
-def test_missing_settings_folder_falls_back_safely(tmp_path, monkeypatch):
-    import store
-    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
-    gone = tmp_path / "USB drive" / "SyncMate"
-    gone.mkdir(parents=True)
-    store.set_data_dir(str(gone))
-    shutil.rmtree(tmp_path / "USB drive")                        # drive unplugged
-    assert store.data_dir() == store.app_dir()                   # nothing is written there
-    assert "not found" in store.data_dir_problem()
-    assert not gone.exists()
+def test_import_rejects_other_files(tmp_path):
+    from store import read_settings_file
+    bad = tmp_path / "notes.json"
+    bad.write_text('{"hello": 1}')
+    with pytest.raises(ValueError):
+        read_settings_file(str(bad))
+    junk = tmp_path / "photo.json"
+    junk.write_bytes(b"\x89PNG...")
+    with pytest.raises(ValueError):
+        read_settings_file(str(junk))

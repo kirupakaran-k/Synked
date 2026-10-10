@@ -10,8 +10,7 @@ from dataclasses import asdict, dataclass, field
 
 
 def app_dir() -> str:
-    """SyncMate's fixed home: %APPDATA%\\SyncMate. Holds the pointer to the settings folder
-    and small signal files, so it never moves."""
+    """SyncMate's home: %APPDATA%\\SyncMate."""
     base = os.environ.get("SYNCMATE_HOME")
     if not base:
         if os.name == "nt":
@@ -22,49 +21,9 @@ def app_dir() -> str:
     return base
 
 
-LOCATION_FILE = "location.json"
-# The files that make up your SyncMate settings (what moves when you change the folder).
-SETTINGS_FILES = ("config.json", "state.db", "syncmate.log", "syncmate.log.1", "syncmate.log.2")
-
-
-def chosen_data_dir() -> str | None:
-    """The settings folder you picked in Settings, or None for the default."""
-    try:
-        with open(os.path.join(app_dir(), LOCATION_FILE), encoding="utf-8") as f:
-            folder = json.load(f).get("folder")
-        return folder or None
-    except (OSError, ValueError):
-        return None
-
-
 def data_dir() -> str:
-    """Where your syncs (config.json), sync history (state.db) and the log live:
-    the folder chosen in Settings, or %APPDATA%\\SyncMate by default."""
-    chosen = chosen_data_dir()
-    if chosen and os.path.isdir(chosen):
-        return chosen
+    """Where your syncs (config.json), sync history (state.db) and the log live."""
     return app_dir()
-
-
-def data_dir_problem() -> str | None:
-    """A message if the chosen settings folder can't be reached (e.g. a drive is unplugged)."""
-    chosen = chosen_data_dir()
-    if chosen and not os.path.isdir(chosen):
-        return f"Settings folder not found: {chosen}"
-    return None
-
-
-def set_data_dir(folder: str | None) -> None:
-    """Point SyncMate at a settings folder (None = back to the default)."""
-    path = os.path.join(app_dir(), LOCATION_FILE)
-    if not folder or os.path.normcase(os.path.abspath(folder)) == os.path.normcase(app_dir()):
-        if os.path.exists(path):
-            os.remove(path)
-        return
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"folder": os.path.abspath(folder)}, f, indent=2, ensure_ascii=False)
-    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------- config
@@ -142,6 +101,10 @@ class Config:
                 raw = json.load(f)
         except (OSError, ValueError):
             return cls()
+        return cls.from_dict(raw if isinstance(raw, dict) else {})
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Config":
         jobs = []
         for j in raw.get("jobs", []):
             members = [Member(path=m["path"], id=m.get("id") or _new_id(),
@@ -261,3 +224,47 @@ class StateDB:
         with self._lock:
             self._db.commit()
             self._db.close()
+
+
+# --------------------------------------------------------------------------- export / import
+
+EXPORT_KIND = "SyncMate folder syncs"
+
+
+def export_settings(path: str, config: Config, version: str = "") -> int:
+    """Save your folder syncs (and theme) to a file you choose. Returns how many syncs.
+    Sync history isn't included: it belongs to this PC's copies of the folders."""
+    import time
+    data = {"kind": EXPORT_KIND, "app_version": version,
+            "exported": time.strftime("%Y-%m-%d %H:%M:%S"), "theme": config.theme,
+            "jobs": [{"main": j.main, "paused": j.paused,
+                      "members": [{"path": m.path, "mode": m.mode, "versions": m.versions}
+                                  for m in j.members]} for j in config.jobs]}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+    return len(config.jobs)
+
+
+def read_settings_file(path: str) -> Config:
+    """Read an exported file (or a SyncMate config.json). Every job and folder gets a new id,
+    so importing never mixes with existing sync history. Raises ValueError if it isn't a
+    SyncMate file."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except OSError as e:
+        raise ValueError(f"Couldn't open the file: {e.strerror or e}") from e
+    except ValueError as e:
+        raise ValueError("That file isn't a SyncMate settings file.") from e
+    if not isinstance(raw, dict) or not ("jobs" in raw or "pairs" in raw):
+        raise ValueError("That file isn't a SyncMate settings file.")
+    try:
+        cfg = Config.from_dict(raw)
+    except (KeyError, TypeError) as e:
+        raise ValueError("That file is damaged or incomplete.") from e
+    for j in cfg.jobs:
+        j.id = _new_id()
+        j.members = [Member(path=m.path, mode=m.mode, versions=m.versions) for m in j.members]
+    return cfg

@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 2.2 - Export and import, cleaner builds
+
+Settings has Export… / Import… for your folder syncs (replace or add; overlapping syncs skipped; missing folders wait until they appear). The 'settings folder' option from 2.1 is replaced by this. build.bat now puts the app in 'build <version>' outside the version folders (e.g. D:\syncmate\build 2.2), keeps its tools in %LOCALAPPDATA%\SyncMate\build-env and leaves no .venv or __pycache__ behind.
+
 ## 2.1 - Build folders, choosable settings folder
 
 build.bat builds each version into its own 'build <version>' folder (e.g. 'build 2.1'); Settings has a 'Settings folder' option to keep your syncs, sync history and log in a folder of your choice.

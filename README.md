@@ -8,17 +8,22 @@ moving it.
 
 1. Install Python 3.10 or newer: `winget install Python.Python.3.12`
    (or from python.org; tick **Add python.exe to PATH**).
-2. Double-click **`build.bat`**. A couple of minutes later the app is ready in a folder
-   named after its version, e.g. **`build 2.1\SyncMate.exe`** (with its build log).
-   Each version gets its own build folder, so older builds stay where they are.
+2. Double-click **`build.bat`** in the version's folder. A couple of minutes later the app is
+   ready in a folder named after its version, **outside** the version folders, e.g.
+   `D:\syncmate\build 2.2\SyncMate.exe` (with its icon and build log).
+
+   The build tools (Python libraries, about 50 MB) are kept in
+   `%LOCALAPPDATA%\SyncMate\build-env`, not in your SyncMate folder, and are reused by every
+   build. No `.venv` or `__pycache__` folders are left behind; leftovers from older builds
+   are removed. You don't need any of them to *run* SyncMate, only to build it.
 
    To **update** later, just run `build.bat` again. It closes the running SyncMate
-   (letting it finish any copy in progress), rebuilds that version's folder, starts the new
-   SyncMate if one was running, and closes its own window when done. If something goes
+   (letting it finish any copy in progress), rebuilds that version's build folder, starts the
+   new SyncMate if one was running, and closes its own window when done. If something goes
    wrong, the window stays open so you can read why. If *Start with Windows* is on, it
    follows to the newest build the next time that build runs.
 
-3. Run `build 2.1\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+3. Run `build 2.2\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
    **connected folders**, and click **Start syncing**. You can also **drag folders from
    File Explorer** onto the boxes or onto the window (several at once: the first becomes
    Main, the rest connected folders).
@@ -30,7 +35,8 @@ moving it.
    or Remove it.
 
    The **⚙ settings** button (top right) has Start with Windows, the Theme slider
-   (Auto / Light / Dark) and the full activity log.
+   (Auto / Light / Dark), **Export… / Import…** for your folder syncs, and the full
+   activity log.
 
 You can also run it without building: `py app.py`
 (after `py -m pip install -r requirements.txt`).
@@ -79,17 +85,18 @@ If a OneDrive folder holds cloud-only files (cloud icon), SyncMate downloads eac
 the first time it syncs it. To keep things fast, right-click the OneDrive folder and
 choose **Always keep on this device**.
 
-## Where your settings are kept
+## Where your settings are kept, and exporting them
 
 Your folder syncs (`config.json`), their sync history (`state.db`) and the log
-(`syncmate.log`) are kept in `%APPDATA%\SyncMate` by default.
+(`syncmate.log`) are kept in `%APPDATA%\SyncMate`.
 
-To keep them somewhere else (another drive, a backup folder, or to take them to a new PC),
-open **⚙ settings → Settings folder → Change…** and pick a folder. SyncMate moves the files
-there and carries on syncing. If the folder already has SyncMate settings, you can choose
-to use those or replace them. **Use default** moves them back. Pick a folder SyncMate
-itself isn't syncing. If the chosen folder can't be found (say, a drive is unplugged),
-SyncMate says so and starts with the default folder instead.
+**⚙ settings → Export…** saves all your folder syncs (folders, sync types, old-files
+options, paused or not) and the theme to a `.json` file wherever you like.
+**Import…** loads such a file, on this PC or another one. You can **replace** your current
+syncs or **add** to them; syncs that would overlap folders already being synced are
+skipped. Folders that don't exist on this PC yet are imported anyway: those syncs wait and
+start by themselves when the folders appear. Sync history isn't exported, because it
+belongs to this PC's copies of the files; after an import the folders are compared once.
 
 ## Files
 

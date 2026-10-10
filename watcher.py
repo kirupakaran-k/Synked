@@ -100,14 +100,6 @@ def _setup_file_log() -> logging.Logger:
     return log
 
 
-def close_file_log() -> None:
-    """Release the log file (so it can be moved to another folder)."""
-    log = logging.getLogger("syncmate")
-    for h in list(log.handlers):
-        log.removeHandler(h)
-        h.close()
-
-
 def _norm(p: str) -> str:
     return os.path.normcase(os.path.abspath(p))
 
