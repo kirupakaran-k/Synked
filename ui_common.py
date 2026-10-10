@@ -13,9 +13,11 @@ ONEDRIVE = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or "
 PALETTE = {
     # bg matches the Sun Valley theme's own background colours
     "light": {"bg": "#fafafa", "fg": "#1c1c1c", "muted": "#5F6670", "error": "#C42B1C",
-              "track": "#E9E9EC", "thumb": "#005FB8", "on_thumb": "#FFFFFF"},
+              "track": "#E9E9EC", "thumb": "#005FB8", "on_thumb": "#FFFFFF",
+              "line": "#B9BEC6"},
     "dark": {"bg": "#1c1c1c", "fg": "#F2F2F2", "muted": "#A3A9B2", "error": "#FF8A80",
-             "track": "#2E2E2E", "thumb": "#57C8FF", "on_thumb": "#101010"},
+             "track": "#2E2E2E", "thumb": "#57C8FF", "on_thumb": "#101010",
+             "line": "#555B64"},
 }
 STATE_COLOR = {
     "synced": COLORS["synced"], "syncing": COLORS["syncing"], "starting": COLORS["syncing"],

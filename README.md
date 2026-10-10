@@ -10,7 +10,7 @@ moving it.
    (or from python.org; tick **Add python.exe to PATH**).
 2. Double-click **`build.bat`** in the version's folder. A couple of minutes later the app is
    ready in a folder named after its version, **outside** the version folders, e.g.
-   `D:\syncmate\build 2.4\SyncMate.exe` (with its icon and build log).
+   `D:\syncmate\build 2.5\SyncMate.exe` (with its icon and build log).
 
    The build tools (Python libraries, about 50 MB) are kept in
    `%LOCALAPPDATA%\SyncMate\build-env`, not in your SyncMate folder, and are reused by every
@@ -23,18 +23,22 @@ moving it.
    wrong, the window stays open so you can read why. If *Start with Windows* is on, it
    follows to the newest build the next time that build runs.
 
-3. Run `build 2.4\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+3. Run `build 2.5\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
    **connected folders**, and click **Start syncing**. You can also **drag folders from
    File Explorer** onto the boxes or onto the window (several at once: the first becomes
    Main, the rest connected folders).
 
-   Each folder sync shows live progress while it copies (current file, items and MB done,
+   Each folder sync shows its Main folder on top with a tree branching down to every
+   connected folder, each with a badge for how it syncs (⇄ two-way, → Main to folder,
+   ← folder to Main). It shows live progress while it copies (current file, items and MB done,
    and a progress bar), then the time and day it last synced. **Click a folder sync** (or
    its ⋮ button) to expand it: change folders, sync types and options, add or remove
    connected folders and **Apply**; Pause / Resume, Sync now, see its **recent activity**,
    or Remove it.
 
-   The window rearranges itself when you make it narrow (rows wrap and stack).
+   The window rearranges itself when you make it narrow (rows wrap and stack). A folder sync
+   opens downward like a curtain (and closes back up), the settings menu fades in, and
+   switching theme is a single quick redraw.
    The **⚙ settings** button (top right) has Start with Windows, the Theme slider
    (Auto / Light / Dark), **Export / Import** of your folder sync configurations, and the full
    activity log.

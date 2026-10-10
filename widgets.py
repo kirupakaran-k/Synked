@@ -488,7 +488,7 @@ class Tooltip:
         if y + w.winfo_reqheight() > sh - 8:
             y = self.root.winfo_pointery() - w.winfo_reqheight() - 10
         w.geometry(f"+{x}+{y}")
-        w.deiconify()
+        fade_in(w, 120)
         self._watch = self.root.after(200, self._check)
 
     def hide(self):
@@ -574,110 +574,27 @@ def ease_out(t: float) -> float:
     return 1 - (1 - t) ** 3
 
 
-class Crossfade:
-    """Smooth window-wide transitions, the way modern apps change theme or layout.
-
-    A picture of the window is laid over it, the change is made out of sight
-    underneath, and the picture then fades away to reveal the result, so the
-    piece-by-piece redrawing in between is never seen.
-    """
-
-    def __init__(self, root, enabled: bool = True):
-        self.root, self.enabled = root, enabled
-        self.overlay = None
-        self._job = None
-
-    def _snapshot(self):
-        from PIL import ImageGrab
-        r = self.root
-        r.update_idletasks()
-        x, y, w, h = r.winfo_rootx(), r.winfo_rooty(), r.winfo_width(), r.winfo_height()
-        if w < 10 or h < 10:
-            return None
+def fade_in(win, ms: int = 150) -> None:
+    """Show a (withdrawn) top-level window by fading it in, drawn in full first."""
+    def alpha(a):
         try:
-            img = ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True)
-        except TypeError:                       # older Pillow / not Windows
-            img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
-        if img.size != (w, h):
-            return None
-        return img, (x, y, w, h)
-
-    def _usable(self) -> bool:
-        r = self.root
-        try:
-            return self.enabled and r.state() in ("normal", "zoomed") and \
-                bool(r.winfo_viewable()) and str(r.tk.call("focus")) not in ("", "none")
-        except tk.TclError:
-            return False
-
-    def run(self, change, fade_ms: int = 180, hold_ms: int = 0) -> None:
-        """Do change() behind a fading picture of the window."""
-        if self.overlay is not None or not self._usable():
-            change()                            # already covered, or not on screen
-            return
-        try:
-            shot = self._snapshot()
-        except Exception:
-            shot = None
-        if shot is None:
-            change()
-            return
-        img, (x, y, w, h) = shot
-        focus = str(self.root.tk.call("focus"))
-        ov = self.overlay = tk.Toplevel(self.root)
-        ov.withdraw()
-        ov.overrideredirect(True)
-        try:
-            ov.transient(self.root)
-            ov.attributes("-alpha", 1.0)
+            win.attributes("-alpha", a)
         except tk.TclError:
             pass
-        ov._photo = ImageTk.PhotoImage(img)
-        tk.Label(ov, image=ov._photo, borderwidth=0, highlightthickness=0).pack()
-        ov.geometry(f"{w}x{h}+{x}+{y}")
-        ov.deiconify()
-        no_activate(ov)
-        ov.lift()
-        ov.update_idletasks()
-        try:
-            change()
-            self.root.update_idletasks()        # let everything underneath settle
-        finally:
-            now = str(self.root.tk.call("focus"))
-            if (now in ("", "none") or now.startswith(str(ov))) and focus not in ("", "none"):
-                try:
-                    self.root.tk.call("focus", focus)
-                except tk.TclError:
-                    pass
-            self.root.after(max(0, hold_ms), lambda: self._fade(time.monotonic(), fade_ms))
+    alpha(0.0)
+    win.deiconify()
+    win.update_idletasks()
+    start = time.monotonic()
 
-    def _fade(self, start, fade_ms):
-        ov = self.overlay
-        if ov is None:
-            return
-        t = min(1.0, (time.monotonic() - start) * 1000 / max(1, fade_ms))
+    def step():
         try:
-            ov.attributes("-alpha", 1 - ease_out(t))
+            t = min(1.0, (time.monotonic() - start) * 1000 / ms)
+            alpha(ease_out(t))
+            if t < 1.0:
+                win.after(12, step)
         except tk.TclError:
-            t = 1.0
-        if t >= 1.0:
-            self.finish()
-        else:
-            self._job = self.root.after(12, self._fade, start, fade_ms)
-
-    def finish(self):
-        if self._job is not None:
-            try:
-                self.root.after_cancel(self._job)
-            except tk.TclError:
-                pass
-            self._job = None
-        if self.overlay is not None:
-            try:
-                self.overlay.destroy()
-            except tk.TclError:
-                pass
-            self.overlay = None
+            pass
+    step()
 
 
 class Flyout:

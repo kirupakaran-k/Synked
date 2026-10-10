@@ -19,7 +19,7 @@ from icon import COLORS, make_icon, save_ico  # noqa: E402
 from store import (CONFIG_EXT, Member, app_dir, data_dir, export_settings,  # noqa: E402
                    read_settings_file)
 from version import VERSION  # noqa: E402
-from widgets import (Crossfade, FlowRow, Flyout, SlideSwitch, Tooltip, dots, gear,  # noqa: E402
+from widgets import (FlowRow, Flyout, SlideSwitch, Tooltip, dots, fade_in, gear,  # noqa: E402
                      plus, red_x, sync_arrow)
 from cards import JobCard  # noqa: E402
 from ui_common import IS_WIN, PALETTE, elide, open_folder  # noqa: E402
@@ -138,7 +138,6 @@ class App:
 
         self.theme = self._wanted_theme()
         self.tooltip = Tooltip(root)
-        self.fx = Crossfade(root, enabled=IS_WIN)   # smooth theme / layout changes
         sv_ttk.set_theme(self.theme)
         self._fonts()
         self._styles()
@@ -249,7 +248,7 @@ class App:
         if t != self.theme:
             # let the switch finish sliding, then cross-fade the whole window to the new look
             self.root.after(170, lambda: self._wanted_theme() == t and self.theme != t and
-                            self.fx.run(lambda: self._apply_theme(t), fade_ms=280))
+                            self.switch_theme(t))
 
     def _system_theme(self) -> str:
         try:
@@ -276,58 +275,87 @@ class App:
         except tk.TclError:
             return self.f_body.metrics("linespace")
 
-    def _styles(self):
-        pal = PALETTE[self.theme]
-        s = ttk.Style()
-        s.configure("Title.TLabel", font=self.f_title)
-        s.configure("Icon.TButton", padding=(6, 2, 6, 3))
-        s.configure("Body.TLabel", font=self.f_body)
-        s.configure("Muted.TLabel", font=self.f_small, foreground=pal["muted"])
-        s.configure("Name.TLabel", font=self.f_bold)
-        s.configure("Arrow.TLabel", font=self.f_arrow, foreground=pal["muted"])
-        s.configure("Error.TLabel", font=self.f_small, foreground=pal["error"])
-        self.bg = self.card_bg = pal["bg"]
-        s.configure("Inner.TFrame", background=self.card_bg)
-        for name in ("Name", "Muted", "Arrow", "Error", "Body"):
-            s.configure(f"Card.{name}.TLabel", background=self.card_bg)
-        s.configure("Card.Name.TLabel", font=self.f_bold)
-        s.configure("Card.Body.TLabel", font=self.f_body)
-        s.configure("Card.Muted.TLabel", font=self.f_small, foreground=pal["muted"])
-        s.configure("Card.Arrow.TLabel", font=self.f_arrow, foreground=pal["muted"])
-        s.configure("Card.Error.TLabel", font=self.f_small, foreground=pal["error"])
+    SV_THEMES = {"light": ("sun-valley-light", "sv_light"), "dark": ("sun-valley-dark", "sv_dark")}
 
-    def _apply_theme(self, theme: str):
+    def _styles(self):
+        """Set up every style for BOTH themes, once.
+
+        ttk keeps styles per theme, so with both prepared a theme switch is a single
+        ttk pass: no style is changed at switch time (changing one makes Tk lay out and
+        redraw every widget again)."""
+        s = ttk.Style()
+        tk_ = self.root.tk
+        for theme, (name, ns) in self.SV_THEMES.items():
+            pal = PALETTE[theme]
+            c = dict(zip(*[iter(tk_.splitlist(tk_.call("array", "get",
+                                                        f"::ttk::theme::{ns}::colors")))] * 2))
+            card = pal["bg"]
+            self.__dict__.setdefault("_sv_colors", {})[theme] = c
+            settings = {
+                # what Sun Valley sets each time the theme changes, set up front instead
+                ".": {"configure": {"background": c["-bg"], "foreground": c["-fg"],
+                                    "troughcolor": c["-bg"], "focuscolor": c["-selbg"],
+                                    "selectbackground": c["-selbg"],
+                                    "selectforeground": c["-selfg"], "insertwidth": 1,
+                                    "insertcolor": c["-fg"], "fieldbackground": c["-bg"],
+                                    "font": "SunValleyBodyFont", "borderwidth": 0,
+                                    "relief": "flat"},
+                      "map": {"foreground": [("disabled", c["-disfg"])]}},
+                "Title.TLabel": {"configure": {"font": str(self.f_title)}},
+                "Icon.TButton": {"configure": {"padding": (6, 2, 6, 3)}},
+                "Body.TLabel": {"configure": {"font": str(self.f_body)}},
+                "Muted.TLabel": {"configure": {"font": str(self.f_small), "foreground": pal["muted"]}},
+                "Name.TLabel": {"configure": {"font": str(self.f_bold)}},
+                "Error.TLabel": {"configure": {"font": str(self.f_small), "foreground": pal["error"]}},
+                "Inner.TFrame": {"configure": {"background": card}},
+                "Card.Name.TLabel": {"configure": {"font": str(self.f_bold), "background": card}},
+                "Card.Body.TLabel": {"configure": {"font": str(self.f_body), "background": card}},
+                "Card.Muted.TLabel": {"configure": {"font": str(self.f_small), "background": card,
+                                                    "foreground": pal["muted"]}},
+                "Card.Error.TLabel": {"configure": {"font": str(self.f_small), "background": card,
+                                                    "foreground": pal["error"]}},
+            }
+            s.theme_settings(name, settings)
+        # Sun Valley also walks every widget on each theme change (Tk's tk_setPalette) to
+        # recolour plain Tk widgets. SyncMate colours its own, so keep only the cheap part:
+        # the default colours for widgets made later.
+        tk_.eval("""
+            proc configure_colors {} {
+                switch -- [ttk::style theme use] {
+                    sun-valley-dark {set ns sv_dark}
+                    sun-valley-light {set ns sv_light}
+                    default {return}
+                }
+                upvar #0 ::ttk::theme::${ns}::colors c
+                foreach {opt val} [list background $c(-bg) foreground $c(-fg) \
+                        highlightColor $c(-selbg) highlightBackground $c(-bg) \
+                        selectBackground $c(-selbg) selectForeground $c(-selfg) \
+                        activeBackground $c(-selbg) activeForeground $c(-selfg) \
+                        insertBackground $c(-fg) troughColor $c(-bg) \
+                        disabledForeground $c(-disfg)] {
+                    option add *$opt $val widgetDefault
+                }
+                . configure -background $c(-bg)
+            }
+        """)
+        self.bg = self.card_bg = PALETTE[self.theme]["bg"]
+
+    def switch_theme(self, theme: str) -> None:
+        """Switch light/dark. Everything for both themes is prepared at start-up, so this
+        is one ttk pass plus recolouring only the few widgets SyncMate draws itself."""
+        if theme == self.theme:
+            return
         old_bg = PALETTE[self.theme]["bg"]
         self.theme = theme
+        self.bg = self.card_bg = PALETTE[theme]["bg"]
         self.tooltip.hide()
-        # Sun Valley's own recolouring (Tk's tk_setPalette) leaves a helper window behind
-        # if it ever fails; clear it so this theme change can run.
-        self.root.tk.eval("catch {destroy .___tk_set_palette}")
         sv_ttk.set_theme(theme)
-        self.root.update_idletasks()
-        self._styles()
         self._paint_theme(old_bg)
+        for card in self.cards.values():    # cards keep their widgets; only icons change
+            card.retheme()
         dark_titlebar(self.root, theme == "dark")
-        # Sun Valley recolours the window from <<ThemeChanged>>, which Windows may run a
-        # little later than here; _on_theme_changed paints our colours again after it.
-        # Two more passes catch anything still in flight, whatever order Tk runs things.
-        self.root.after_idle(self._paint_theme, old_bg)
-        self.root.after(300, self._paint_theme, old_bg)
-        self.card_sig = None  # force rebuild
-        self.refresh()
-
-    def _on_theme_changed(self, e=None):
-        """Sun Valley's <<ThemeChanged>> handler (it runs after this one) recolours the
-        window its own way; paint our colours back on top once it is done."""
-        if e is not None and e.widget is not self.root:
-            return
-        if not self._repaint_pending:
-            self._repaint_pending = True
-            self.root.after_idle(self._repaint)
-
-    def _repaint(self):
-        self._repaint_pending = False
-        self._paint_theme()
+        if self.activity_win and self.activity_win.winfo_exists():
+            dark_titlebar(self.activity_win.win, theme == "dark")
 
     def _paint_theme(self, old_bg=None):
         """Apply the current theme's colours to every widget we colour ourselves.
@@ -356,6 +384,8 @@ class App:
         fg = PALETTE[self.theme]["fg"].lower()
         bg = self.bg.lower()
         for w in children:
+            if isinstance(w, FlowRow):
+                w.bg = self.bg               # for line frames it makes later
             try:
                 cls = w.winfo_class()
                 # only change what differs: every change makes Tk redraw that widget
@@ -369,9 +399,19 @@ class App:
                 elif cls in ("Frame", "Label", "Canvas"):
                     if str(w.cget("background")).lower() in stale - {bg}:
                         w.configure(background=self.bg)
+                elif cls == "TCombobox":
+                    self._recolor_dropdown(w)
             except tk.TclError:
                 pass        # one odd widget must never stop the rest from being recoloured
             self._recolor_plain(w, old_bg)
+
+    def _recolor_dropdown(self, box) -> None:
+        """A dropdown's list is a plain Tk listbox in its own pop-up window."""
+        c = self._sv_colors[self.theme]
+        lb = f"{box.tk.call('ttk::combobox::PopdownWindow', box)}.f.l"
+        if str(box.tk.call(lb, "cget", "-background")).lower() != c["-bg"].lower():
+            box.tk.call(lb, "configure", "-background", c["-bg"], "-foreground", c["-fg"],
+                        "-selectbackground", c["-selbg"], "-selectforeground", c["-selfg"])
 
     def tint(self, w, role="muted"):
         """Colour a label's text. (Sun Valley overrides style colours, so set them directly.)"""
@@ -452,8 +492,6 @@ class App:
         root.bind_all("<Button-1>", self._click_anywhere, add="+")
         root.bind("<Escape>", lambda e: self.hide_settings())
         root.bind("<FocusOut>", self._app_focus_out, add="+")
-        self._repaint_pending = False
-        root.bind("<<ThemeChanged>>", self._on_theme_changed, add="+")
         self._summary_override = None
         self.drop_target(root, self.on_main_drop, self._main_hover)
 
@@ -678,11 +716,12 @@ class App:
                 "plus": ImageTk.PhotoImage(plus(line, pal["on_thumb"])),
                 "remove": {k: ImageTk.PhotoImage(red_x(bw, bh, c)) for k, c in
                            (("normal", "#C42B1C"), ("hover", "#AE2517"), ("pressed", "#962012"))},
-                # the arrow between a sync's folders, in the Add folder sync button's colours
-                "arrows": {(kind, vertical): ImageTk.PhotoImage(
-                               sync_arrow(round(bh * 1.5), bh, kind, pal["thumb"],
-                                          pal["on_thumb"], vertical))
-                           for kind in ("both", "right", "left") for vertical in (False, True)},
+                # the badge at the end of each tree branch, in the Add folder sync button's
+                # colours: ⇄ two-way, → Main to folder, ← folder to Main
+                "badges": {kind: ImageTk.PhotoImage(
+                               sync_arrow(round(bh * 1.3), bh, kind, pal["thumb"],
+                                          pal["on_thumb"], vertical=False))
+                           for kind in ("both", "right", "left")},
             }
         return cache[self.theme]
 
@@ -691,7 +730,7 @@ class App:
         icons = self._icons()
         self._gear_img, self._dots_img = icons["gear"], icons["dots"]
         self._plus_img, self._remove_imgs = icons["plus"], icons["remove"]
-        self._arrow_imgs = icons["arrows"]
+        self._badge_imgs = icons["badges"]
         if getattr(self, "_custom_painted", None) == self.theme:
             return                      # already in this theme's colours: nothing to redraw
         self._custom_painted = self.theme
@@ -810,7 +849,7 @@ class App:
     def set_expanded(self, key) -> None:
         """Expand one card in place (only one at a time); None collapses all."""
         if self.expanded != key:
-            self.fx.run(lambda: self._set_expanded(key), fade_ms=170)
+            self._set_expanded(key)
 
     def _set_expanded(self, key) -> None:
         if self.expanded == key:
@@ -830,7 +869,7 @@ class App:
     def new_sync(self, prefill=()) -> None:
         """Show the blank 'New folder sync' card at the top of the list."""
         self.hide_settings(animate=False)
-        self.fx.run(lambda: self._new_sync(prefill), fade_ms=170)
+        self._new_sync(prefill)
 
     def _new_sync(self, prefill=()) -> None:
         if not self._draft:
@@ -847,7 +886,7 @@ class App:
         card.main_box.focus_set()
 
     def close_draft(self) -> None:
-        self.fx.run(self._close_draft, fade_ms=170)
+        self._close_draft()
 
     def _close_draft(self) -> None:
         self._draft = False
@@ -1031,7 +1070,7 @@ class App:
             self._last_theme_check = now
             t = self._wanted_theme()
             if t != self.theme:
-                self.fx.run(lambda: self._apply_theme(t), fade_ms=280)
+                self.switch_theme(t)
         self.refresh()
         if self.activity_win and self.activity_win.winfo_exists():
             self.activity_win.refresh()
@@ -1047,6 +1086,7 @@ class ActivityWindow:
         self.app = app
         px = app.px
         self.win = win = tk.Toplevel(app.root)
+        win.withdraw()                      # fades in once it is fully drawn
         win.title("SyncMate — Activity")
         win.geometry(f"{px(720)}x{px(420)}")
         f = ttk.Frame(win, padding=px(16))
@@ -1070,8 +1110,9 @@ class ActivityWindow:
         self.tree.grid(row=1, column=0, sticky="nsew")
         sb.grid(row=1, column=1, sticky="ns")
         self._seen = None
-        dark_titlebar(win, app.theme == "dark")
         self.refresh()
+        fade_in(win, 160)
+        dark_titlebar(win, app.theme == "dark")
 
     def winfo_exists(self):
         try:

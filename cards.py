@@ -68,25 +68,29 @@ class JobCard:
         self.is_new = job is None
         self.key = "new" if self.is_new else job.id
         px, bg = app.px, app.card_bg
-        self.bg = bg
         self.rows: list = []        # connected-folder rows in the editor
         self._activity_sig = None
+        self._rows_for = None       # which job version the editor rows were filled from
 
         f = self.frame = ttk.Frame(parent, style="Card.TFrame", padding=(px(16), px(12)))
         f.grid(row=row, column=0, sticky="ew", pady=(0, px(10)))
-        f.columnconfigure(1, weight=1, uniform="side")
-        f.columnconfigure(3, weight=1, uniform="side")
+        f.columnconfigure(1, weight=1)
         self._click = []  # widgets that toggle the card when clicked
 
-        # ---- header -------------------------------------------------------
+        # ---- header: Main on top, each connected folder below it ----------------
+        #   ●  Language                                   ⋮
+        #      Main · D:\KK
+        #      [⇅]  Language
+        #           Two-way · OneDrive
+        #      [↓]  New folder
+        #           Update · D:\
         self.dot = tk.Canvas(f, width=px(10), height=px(10), highlightthickness=0, background=bg)
         self.dot.create_oval(1, 1, px(10) - 1, px(10) - 1, tags="dot")
-        self.dot.grid(row=0, column=0, sticky="w", padx=(0, px(12)))
+        self.dot.grid(row=0, column=0, sticky="nw", padx=(0, px(12)), pady=(px(5), 0))
+        self.badges = []            # (label, mode) for each connected folder
         if self.is_new:
-            c = PALETTE[app.theme]["thumb"]
-            self.dot.itemconfigure("dot", fill=c, outline=c)
             box = tk.Frame(f, background=bg)
-            box.grid(row=0, column=1, columnspan=3, sticky="ew")
+            box.grid(row=0, column=1, sticky="ew")
             ttk.Label(box, text="New folder sync", style="Card.Name.TLabel").pack(anchor="w")
             sub = app.tint(ttk.Label(box, text="Choose a Main folder and the folders to keep in "
                                                "sync with it", style="Card.Muted.TLabel"))
@@ -94,47 +98,47 @@ class JobCard:
             box.bind("<Configure>", lambda e: e.width > 50 and _px(sub.cget("wraplength")) != e.width
                      and sub.configure(wraplength=e.width), add="+")
         else:
-            # Main, arrow, connected folders: side by side, or stacked when narrow
-            head = FlowRow(f, bg=bg, gap=px(14), vgap=px(4), mode="stack",
-                           on_layout=self._header_layout)
-            head.grid(row=0, column=1, columnspan=3, sticky="ew")
-            self.head = head
-            self._header_side(head, folder_name(job.main),
-                              "Main · " + elide(pretty_path(os.path.dirname(job.main)) or job.main, 36))
-            ms = job.members
-            arrow = tk.Label(head, background=bg, borderwidth=0, padx=0, pady=0)
-            head.add(arrow, sticky="")
-            if len(ms) == 1:
-                m = ms[0]
-                self._header_side(head, folder_name(m.path),
-                                  f"{SHORT_MODE[m.mode]} · "
-                                  + elide(pretty_path(os.path.dirname(m.path)) or m.path, 34))
-                self._arrow_mode = m.mode
-            else:
-                self._header_side(head, f"{len(ms)} folders",
-                                  elide(", ".join(folder_name(m.path) for m in ms), 44))
-                self._arrow_mode = "two-way"
-            self.arrow = arrow
-            self._header_layout(False)
-            self._click.append(head)
+            head = self.head = tk.Frame(f, background=bg)
+            head.grid(row=0, column=1, sticky="ew")
+            head.columnconfigure(2, weight=1)
+            self._text_block(head, 0, 0, folder_name(job.main),
+                             "Main · " + elide(pretty_path(os.path.dirname(job.main)) or job.main, 60),
+                             columnspan=3)
+            # a tree: a line runs down from Main and branches off to each connected folder
+            self.branches = []
+            for i, m in enumerate(job.members, start=1):
+                branch = tk.Canvas(head, width=px(26), height=1, background=bg,
+                                   highlightthickness=0, borderwidth=0)
+                branch.grid(row=i, column=0, sticky="ns")
+                badge = tk.Label(head, background=bg, borderwidth=0, padx=0, pady=0)
+                badge.grid(row=i, column=1, sticky="w", pady=(px(8), 0), padx=(0, px(12)))
+                self.badges.append((badge, m.mode))
+                self.branches.append((branch, badge, i == len(job.members)))
+                self._text_block(head, i, 2, folder_name(m.path),
+                                 f"{SHORT_MODE[m.mode]} · "
+                                 + elide(pretty_path(os.path.dirname(m.path)) or m.path, 56),
+                                 pady=(px(8), 0))
+                self._click += [badge, branch]
+                branch.bind("<Configure>", lambda e: self._draw_tree(), add="+")
+            self._click += [head, f, self.dot]
             # the ⋮ "more" button: just the icon, no box (a soft highlight on hover)
             self.more = tk.Label(f, image=app._dots_img, background=bg, cursor="hand2",
                                  padx=px(8), pady=px(6), borderwidth=0)
-            self.more.grid(row=0, column=4, sticky="e", padx=(px(10), 0))
+            self.more.grid(row=0, column=2, sticky="ne", padx=(px(10), 0))
             self.more.bind("<Button-1>", lambda e: self.toggle())
-            hover = PALETTE[app.theme]["track"]
-            self.more.bind("<Enter>", lambda e: self.more.configure(background=hover))
-            self.more.bind("<Leave>", lambda e: self.more.configure(background=bg))
-            self._click += [f, self.dot, arrow]
+            self.more.bind("<Enter>", lambda e: self.more.configure(
+                background=PALETTE[self.app.theme]["track"]))
+            self.more.bind("<Leave>", lambda e: self.more.configure(background=self.bg))
+        self.retheme()
 
         # ---- status, live progress -----------------------------------------
         if not self.is_new:
             self.status = app.tint(ttk.Label(f, text="", style="Card.Muted.TLabel"))
-            self.status.grid(row=1, column=1, columnspan=3, sticky="w", pady=(px(8), 0))
+            self.status.grid(row=1, column=1, sticky="w", pady=(px(10), 0))
             self.bar = ttk.Progressbar(f, mode="determinate", maximum=1000)
-            self.bar.grid(row=2, column=1, columnspan=3, sticky="ew", pady=(px(6), 0))
+            self.bar.grid(row=2, column=1, sticky="ew", pady=(px(6), 0))
             self.detail = app.tint(ttk.Label(f, text="", style="Card.Muted.TLabel"))
-            self.detail.grid(row=3, column=1, columnspan=3, sticky="w", pady=(px(3), 0))
+            self.detail.grid(row=3, column=1, sticky="w", pady=(px(3), 0))
             self.bar.grid_remove()
             self.detail.grid_remove()
             self._bar_shown = False
@@ -143,7 +147,7 @@ class JobCard:
 
             # "folder suddenly empty" choices
             self.fix = tk.Frame(f, background=bg)
-            self.fix.grid(row=4, column=1, columnspan=3, sticky="w", pady=(px(8), 0))
+            self.fix.grid(row=4, column=1, sticky="w", pady=(px(8), 0))
             ttk.Button(self.fix, text="Restore files", style="Accent.TButton",
                        command=lambda: app.ctrl.resolve_empty(job.id, False)).pack(
                 side="left", padx=(0, px(8)))
@@ -164,7 +168,7 @@ class JobCard:
     def _wrap_status(self) -> None:
         """Long status lines wrap inside the card instead of running off its edge."""
         try:
-            width = self.frame.grid_bbox(1, 0, 3, 0)[2]
+            width = self.frame.grid_bbox(1, 0, 1, 0)[2]
         except (tk.TclError, IndexError):
             return
         if width > 50:
@@ -172,20 +176,48 @@ class JobCard:
                 if _px(lab.cget("wraplength")) != width:
                     lab.configure(wraplength=width)
 
-    def _header_layout(self, stacked: bool) -> None:
-        """Arrow points sideways when the folders sit side by side, down when stacked."""
-        self.arrow.configure(image=self.app._arrow_imgs[(ARROW_KIND[self._arrow_mode], stacked)])
-        self.dot.grid_configure(sticky="nw" if stacked else "w",
-                                pady=(self.app.px(7) if stacked else 0, 0))
-        if hasattr(self, "more"):
-            self.more.grid_configure(sticky="ne" if stacked else "e")
-        for line in self.head._lines:      # the row's line frames are clickable too
-            line.bind("<Button-1>", lambda e: self.toggle())
-            line.configure(cursor="hand2")
+    @property
+    def bg(self) -> str:
+        return self.app.card_bg
 
-    def _header_side(self, head, title, sub):
-        box = tk.Frame(head, background=self.bg)
-        head.add(box, stretch=True, uniform="side", sticky="ew")
+    def retheme(self) -> None:
+        """Swap in the current theme's icons (colours are handled by the app)."""
+        if self.is_new:
+            c = PALETTE[self.app.theme]["thumb"]
+            self.dot.itemconfigure("dot", fill=c, outline=c)
+            return
+        self.more.configure(image=self.app._dots_img)
+        for badge, mode in self.badges:
+            badge.configure(image=self.app._badge_imgs[ARROW_KIND[mode]])
+        self._draw_tree()
+
+    def _draw_tree(self) -> None:
+        """The tree lines: down from Main, with a rounded branch to each folder's badge."""
+        if not getattr(self, "branches", None):
+            return
+        px = self.app.px
+        color = PALETTE[self.app.theme]["line"]
+        lw = max(1, round(px(1.6)))
+        x, r = px(7), px(7)                           # the trunk, and the corner's radius
+        try:
+            for canvas, badge, last in self.branches:
+                canvas.delete("all")
+                w, h = canvas.winfo_width(), canvas.winfo_height()
+                mid = badge.winfo_y() - canvas.winfo_y() + badge.winfo_height() / 2
+                if h <= 1 or mid <= r:
+                    continue
+                canvas.create_line(x, 0, x, mid - r, fill=color, width=lw)
+                canvas.create_arc(x, mid - 2 * r, x + 2 * r, mid, start=180, extent=90,
+                                  style="arc", outline=color, width=lw)
+                canvas.create_line(x + r, mid, w, mid, fill=color, width=lw)
+                if not last:                          # the trunk carries on to the next one
+                    canvas.create_line(x, mid - r, x, h, fill=color, width=lw)
+        except tk.TclError:
+            pass
+
+    def _text_block(self, parent, row, col, title, sub, columnspan=1, pady=0):
+        box = tk.Frame(parent, background=self.bg)
+        box.grid(row=row, column=col, columnspan=columnspan, sticky="w", pady=pady)
         a = ttk.Label(box, text=title, style="Card.Name.TLabel")
         a.pack(anchor="w")
         b = self.app.tint(ttk.Label(box, text=sub, style="Card.Muted.TLabel"))
@@ -195,10 +227,17 @@ class JobCard:
     # ======================================================================= editor
     def _build_editor(self):
         app, px, bg = self.app, self.app.px, self.bg
+        # The editor opens like a curtain: it sits in a "curtain" frame whose height is
+        # animated from 0 to the editor's full height (and back when closing).
+        self.curtain = tk.Frame(self.frame, background=bg, height=1)
+        self.curtain.grid(row=5, column=0, columnspan=3, sticky="ew")
+        self.curtain.pack_propagate(False)
+        self.curtain.grid_remove()
+        self._curtain_job = None
+        self.opened = False
         ed = self.editor = tk.Frame(self.frame, background=bg)
-        ed.grid(row=5, column=0, columnspan=5, sticky="ew", pady=(px(12), 0))
         ed.columnconfigure(0, weight=1)
-        ttk.Separator(ed).grid(row=0, column=0, sticky="ew", pady=(0, px(12)))
+        ttk.Separator(ed).grid(row=0, column=0, sticky="ew", pady=(px(12), px(12)))
 
         # Main folder
         self._section(ed, 1, "Main folder", "the master copy")
@@ -276,7 +315,6 @@ class JobCard:
 
         self.main_box.bind("<Return>", lambda e: self.apply())
         self.main_box.bind("<Escape>", lambda e: self.cancel())
-        ed.grid_remove()
 
     def _section(self, ed, row, title, hint, pady=(0, 4)):
         top = FlowRow(ed, bg=self.bg, gap=self.app.px(10), vgap=0)
@@ -447,18 +485,83 @@ class JobCard:
     def expand(self, reset: bool = True):
         if reset and not self.is_new:
             self.main.set(self.job.main)
-            self._clear_rows()
-            for m in self.job.members:
-                self._add_row(m)
+            self._fill_rows(self.job.members)
         if not self.rows:
             self._add_row()
         self.err.configure(text="")
         self._hide_confirm()
         self._activity_sig = None
-        self.editor.grid()
+        self._curtain(True)
 
-    def collapse(self):
-        self.editor.grid_remove()
+    def collapse(self, then=None):
+        self._curtain(False, then)
+
+    # ---- the curtain ---------------------------------------------------------
+    OPEN_MS, CLOSE_MS = 260, 200
+
+    def _curtain(self, opening: bool, then=None) -> None:
+        """Slide the editor open (down) or closed (up)."""
+        c, ed = self.curtain, self.editor
+        if self._curtain_job is not None:
+            self.app.root.after_cancel(self._curtain_job)
+            self._curtain_job = None
+        if not opening and not c.winfo_ismapped() and not self.opened:
+            if then:
+                then()
+            return
+        start = c.winfo_height() if c.winfo_ismapped() else 0
+        # while moving, the editor keeps its full size and the curtain clips it
+        ed.pack_forget()
+        c.pack_propagate(False)
+        c.configure(height=max(1, start))
+        c.grid()
+        ed.place(in_=c, x=0, y=0, relwidth=1)
+        self.opened = opening
+        t0 = time.monotonic()
+        ms = self.OPEN_MS if opening else self.CLOSE_MS
+
+        def step():
+            self._curtain_job = None
+            try:
+                t = min(1.0, (time.monotonic() - t0) * 1000 / ms)
+                if opening:
+                    e = 1 - (1 - t) ** 3                 # fast start, gentle stop
+                    full = ed.winfo_reqheight()
+                    c.configure(height=max(1, round(start + (full - start) * e)))
+                    self.app.ensure_visible(self.frame)  # the list follows the card down
+                else:
+                    e = t * t * t                        # gentle start, quick finish
+                    c.configure(height=max(1, round(start * (1 - e))))
+                if t < 1.0:
+                    self._curtain_job = self.app.root.after(12, step)
+                    return
+                ed.place_forget()
+                if opening:                              # from now on it just fits its content
+                    ed.pack(in_=c, fill="x")
+                    c.pack_propagate(True)
+                else:
+                    c.grid_remove()
+                if then:
+                    then()
+            except tk.TclError:
+                pass                                     # the card went away meanwhile
+        step()
+
+    def _fill_rows(self, members) -> None:
+        """Show the job's folders in the editor, re-using the rows already built when they
+        are the same folders (building widgets is the slow part of opening a card)."""
+        if [r["id"] for r in self.rows] != [m.id for m in members]:
+            self._clear_rows()
+            for m in members:
+                self._add_row(m)
+            return
+        for r, m in zip(self.rows, members):
+            r["path"].set(m.path)
+            r["mode"].set(MODE_LABELS[m.mode])
+            r["versions"].set(OLD_FILES_LABELS[bool(m.versions)])
+            r["keep_days"] = max(0, m.keep_days)
+            r["pos"].set(nearest_stop(m.keep_days))
+            r["settle"]()
 
     def update(self, st, job):
         """Refresh status, progress, buttons and recent activity from the latest snapshot."""
@@ -596,7 +699,7 @@ class JobCard:
 
     def cancel(self):
         if self.is_new:
-            self.app.close_draft()
+            self.collapse(then=self.app.close_draft)
         else:
             self.app.set_expanded(None)
 
