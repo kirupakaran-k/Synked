@@ -73,7 +73,9 @@ if defined WASRUNNING (
   echo Starting the new SyncMate...
   start "" "%~dp0SyncMate.exe"
 )
-pause
+rem Close this window by itself after a moment (it stays open only if something fails).
+echo This window will close in 3 seconds...
+>nul ping -n 4 127.0.0.1
 exit /b 0
 
 :fail

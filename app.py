@@ -18,6 +18,7 @@ from PIL import ImageTk  # noqa: E402
 
 from icon import COLORS, make_icon  # noqa: E402
 from store import data_dir  # noqa: E402
+from widgets import SlideSwitch, gear  # noqa: E402
 from watcher import Controller  # noqa: E402
 
 try:
@@ -33,8 +34,10 @@ ONEDRIVE = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or "
 
 PALETTE = {
     # bg matches the Sun Valley theme's own background colours
-    "light": {"bg": "#fafafa", "muted": "#5F6670", "error": "#C42B1C"},
-    "dark": {"bg": "#1c1c1c", "muted": "#A3A9B2", "error": "#FF8A80"},
+    "light": {"bg": "#fafafa", "fg": "#1c1c1c", "muted": "#5F6670", "error": "#C42B1C",
+              "track": "#E9E9EC", "thumb": "#005FB8", "on_thumb": "#FFFFFF"},
+    "dark": {"bg": "#1c1c1c", "fg": "#F2F2F2", "muted": "#A3A9B2", "error": "#FF8A80",
+             "track": "#2E2E2E", "thumb": "#57C8FF", "on_thumb": "#101010"},
 }
 STATE_COLOR = {
     "synced": COLORS["synced"], "syncing": COLORS["syncing"], "starting": COLORS["syncing"],
@@ -251,6 +254,7 @@ class App:
         self._styles()
         self.canvas.configure(background=self.bg)
         self._retint()
+        self._theme_custom_widgets()
         dark_titlebar(self.root, theme == "dark")
         self.card_ids = None  # force rebuild
         self.refresh()
@@ -285,6 +289,8 @@ class App:
         self.summary.grid(row=1, column=0, sticky="w", pady=(px(2), 0))
         ttk.Button(head, text="＋  Add folder pair", style="Accent.TButton",
                    command=self.add_dialog).grid(row=0, column=1, rowspan=2, sticky="e")
+        self.gear_btn = ttk.Button(head, style="Icon.TButton", command=self.toggle_settings)
+        self.gear_btn.grid(row=0, column=2, rowspan=2, sticky="e", padx=(px(8), 0))
 
         # Scrollable list of pairs
         body = ttk.Frame(outer)
@@ -307,29 +313,70 @@ class App:
 
         foot = ttk.Frame(outer)
         foot.grid(row=2, column=0, sticky="ew", pady=(px(12), 0))
-        foot.columnconfigure(2, weight=1)
+        foot.columnconfigure(0, weight=1)
+        ttk.Button(foot, text="Activity", command=self.show_activity).grid(
+            row=0, column=1, padx=(0, px(8)))
+        ttk.Button(foot, text="Sync now", command=lambda: self.ctrl.sync_now()).grid(
+            row=0, column=2)
+
+        self._build_settings()
+        self._theme_custom_widgets()
+        root.bind_all("<Button-1>", self._click_anywhere, add="+")
+        root.bind("<Escape>", lambda e: self.hide_settings())
+
+    # ---------------------------------------------------------------- settings panel
+
+    def _build_settings(self):
+        px = self.px
+        p = self.settings = ttk.Frame(self.root, style="Card.TFrame", padding=(px(18), px(14)))
+        p.columnconfigure(0, weight=1)
+        ttk.Label(p, text="Settings", style="Card.Name.TLabel").grid(
+            row=0, column=0, sticky="w", pady=(0, px(10)))
+
         self.auto_var = tk.BooleanVar(value=get_autostart())
-        auto = ttk.Checkbutton(foot, text="Start with Windows", style="Switch.TCheckbutton",
+        auto = ttk.Checkbutton(p, text="Start with Windows", style="Switch.TCheckbutton",
                                variable=self.auto_var, command=self._toggle_autostart)
-        auto.grid(row=0, column=0, sticky="w")
+        auto.grid(row=1, column=0, sticky="w")
         if not IS_WIN:
             auto.state(["disabled"])
 
-        seg = ttk.Frame(foot)
-        seg.grid(row=0, column=1, sticky="w", padx=(px(24), 0))
-        self.tint(ttk.Label(seg, text="Theme", style="Muted.TLabel")).pack(
-            side="left", padx=(0, px(8)))
-        self.theme_var = tk.StringVar(value=self.ctrl.config.theme)
-        for value, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
-            ttk.Radiobutton(seg, text=label, value=value, variable=self.theme_var,
-                            style="Toggle.TButton", width=6,
-                            command=lambda: self.set_theme_pref(self.theme_var.get())
-                            ).pack(side="left", padx=(0, px(2)))
+        ttk.Separator(p).grid(row=2, column=0, sticky="ew", pady=px(12))
+        self.tint(ttk.Label(p, text="Theme", style="Card.Muted.TLabel")).grid(
+            row=3, column=0, sticky="w", pady=(0, px(6)))
+        self.theme_switch = SlideSwitch(
+            p, [("auto", "Auto"), ("light", "Light"), ("dark", "Dark")],
+            self.ctrl.config.theme, self.set_theme_pref, scale=self.S, font=self.f_body)
+        self.theme_switch.grid(row=4, column=0, sticky="w")
 
-        ttk.Button(foot, text="Activity", command=self.show_activity).grid(
-            row=0, column=3, padx=(0, px(8)))
-        ttk.Button(foot, text="Sync now", command=lambda: self.ctrl.sync_now()).grid(
-            row=0, column=4)
+    def _theme_custom_widgets(self):
+        pal = PALETTE[self.theme]
+        self._gear_img = ImageTk.PhotoImage(gear(self.px(18), pal["fg"]))
+        self.gear_btn.configure(image=self._gear_img)
+        ttk.Style().configure("Icon.TButton", padding=(self.px(7), self.px(6)))
+        self.theme_switch.set_colors({"bg": self.card_bg, "track": pal["track"],
+                                      "thumb": pal["thumb"], "text": pal["muted"],
+                                      "text_on": pal["on_thumb"]})
+
+    def toggle_settings(self):
+        if self.settings.winfo_ismapped():
+            self.hide_settings()
+            return
+        b = self.gear_btn
+        y = b.winfo_rooty() - self.root.winfo_rooty() + b.winfo_height() + self.px(6)
+        self.settings.place(relx=1.0, x=-self.px(24), y=y, anchor="ne")
+        self.settings.lift()
+
+    def hide_settings(self):
+        self.settings.place_forget()
+
+    def _click_anywhere(self, e):
+        """Close the settings panel when clicking somewhere else in the window."""
+        if not self.settings.winfo_ismapped():
+            return
+        w = str(e.widget)
+        if w.startswith(str(self.settings)) or w == str(self.gear_btn):
+            return
+        self.hide_settings()
 
     def _on_yscroll(self, lo, hi):
         self.scroll.set(lo, hi)
