@@ -35,6 +35,7 @@ class Pair:
 class Config:
     pairs: list[Pair] = field(default_factory=list)
     tray_hint_shown: bool = False
+    theme: str = "auto"  # auto | light | dark
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":
@@ -45,14 +46,17 @@ class Config:
         except (OSError, ValueError):
             return cls()
         pairs = [Pair(**p) for p in raw.get("pairs", [])]
-        return cls(pairs=pairs, tray_hint_shown=raw.get("tray_hint_shown", False))
+        theme = raw.get("theme", "auto")
+        return cls(pairs=pairs, tray_hint_shown=raw.get("tray_hint_shown", False),
+                   theme=theme if theme in ("auto", "light", "dark") else "auto")
 
     def save(self, path: str | None = None) -> None:
         path = path or os.path.join(data_dir(), "config.json")
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"pairs": [asdict(p) for p in self.pairs],
-                       "tray_hint_shown": self.tray_hint_shown}, f, indent=2)
+                       "tray_hint_shown": self.tray_hint_shown,
+                       "theme": self.theme}, f, indent=2)
         os.replace(tmp, path)
 
 

@@ -31,8 +31,9 @@ SHOW_FLAG = os.path.join(data_dir(), "show.flag")
 ONEDRIVE = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or ""
 
 PALETTE = {
-    "light": {"muted": "#5F6670", "error": "#C42B1C", "line": "#E3E5E8"},
-    "dark": {"muted": "#A3A9B2", "error": "#FF8A80", "line": "#3A3D42"},
+    # bg matches the Sun Valley theme's own background colours
+    "light": {"bg": "#fafafa", "muted": "#5F6670", "error": "#C42B1C"},
+    "dark": {"bg": "#1c1c1c", "muted": "#A3A9B2", "error": "#FF8A80"},
 }
 STATE_COLOR = {
     "synced": COLORS["synced"], "syncing": COLORS["syncing"], "starting": COLORS["syncing"],
@@ -177,7 +178,7 @@ class App:
         self._icon_img = ImageTk.PhotoImage(make_icon("synced", 64))
         root.iconphoto(True, self._icon_img)
 
-        self.theme = self._system_theme()
+        self.theme = self._wanted_theme()
         sv_ttk.set_theme(self.theme)
         self._fonts()
         self._styles()
@@ -194,6 +195,17 @@ class App:
 
     def px(self, n: float) -> int:
         return int(round(n * self.S))
+
+    def _wanted_theme(self) -> str:
+        """The theme to show: the user's choice, or Windows' own setting when on Auto."""
+        pref = self.ctrl.config.theme
+        return pref if pref in ("light", "dark") else self._system_theme()
+
+    def set_theme_pref(self, pref: str) -> None:
+        self.ctrl.remember(theme=pref)
+        t = self._wanted_theme()
+        if t != self.theme:
+            self._apply_theme(t)
 
     def _system_theme(self) -> str:
         try:
@@ -223,8 +235,7 @@ class App:
         s.configure("Arrow.TLabel", font=self.f_arrow, foreground=pal["muted"])
         s.configure("Error.TLabel", font=self.f_small, foreground=pal["error"])
         s.configure("Ghost.TButton", padding=(self.px(8), self.px(2)))
-        self.bg = s.lookup("TFrame", "background") or self.root.cget("background")
-        self.card_bg = s.lookup("Card.TFrame", "background") or self.bg
+        self.bg = self.card_bg = pal["bg"]
         s.configure("Inner.TFrame", background=self.card_bg)
         for name in ("Name", "Muted", "Arrow", "Error", "Body"):
             s.configure(f"Card.{name}.TLabel", background=self.card_bg)
@@ -295,17 +306,29 @@ class App:
 
         foot = ttk.Frame(outer)
         foot.grid(row=2, column=0, sticky="ew", pady=(px(12), 0))
-        foot.columnconfigure(1, weight=1)
+        foot.columnconfigure(2, weight=1)
         self.auto_var = tk.BooleanVar(value=get_autostart())
         auto = ttk.Checkbutton(foot, text="Start with Windows", style="Switch.TCheckbutton",
                                variable=self.auto_var, command=self._toggle_autostart)
         auto.grid(row=0, column=0, sticky="w")
         if not IS_WIN:
             auto.state(["disabled"])
+
+        seg = ttk.Frame(foot)
+        seg.grid(row=0, column=1, sticky="w", padx=(px(24), 0))
+        self.tint(ttk.Label(seg, text="Theme", style="Muted.TLabel")).pack(
+            side="left", padx=(0, px(8)))
+        self.theme_var = tk.StringVar(value=self.ctrl.config.theme)
+        for value, label in (("auto", "Auto"), ("light", "Light"), ("dark", "Dark")):
+            ttk.Radiobutton(seg, text=label, value=value, variable=self.theme_var,
+                            style="Toggle.TButton", width=6,
+                            command=lambda: self.set_theme_pref(self.theme_var.get())
+                            ).pack(side="left", padx=(0, px(2)))
+
         ttk.Button(foot, text="Activity", command=self.show_activity).grid(
-            row=0, column=2, padx=(0, px(8)))
+            row=0, column=3, padx=(0, px(8)))
         ttk.Button(foot, text="Sync now", command=lambda: self.ctrl.sync_now()).grid(
-            row=0, column=3)
+            row=0, column=4)
 
     def _on_yscroll(self, lo, hi):
         self.scroll.set(lo, hi)
@@ -567,7 +590,7 @@ class App:
         now = time.monotonic()
         if now - getattr(self, "_last_theme_check", 0) > 3:
             self._last_theme_check = now
-            t = self._system_theme()
+            t = self._wanted_theme()
             if t != self.theme:
                 self._apply_theme(t)
         self.refresh()
