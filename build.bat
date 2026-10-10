@@ -66,6 +66,10 @@ pyinstaller --noconfirm --clean --onefile --windowed --name SyncMate --icon sync
   app.py >build.log 2>&1 || goto :fail
 
 copy /y dist\SyncMate.exe SyncMate.exe >nul || goto :fail
+
+rem Windows remembers each file's icon; tell it to refresh so the new icon shows up.
+ie4uinit.exe -show >nul 2>nul
+ie4uinit.exe -ClearIconCache >nul 2>nul
 echo.
 echo Done!  The new SyncMate.exe is ready in this folder.
 

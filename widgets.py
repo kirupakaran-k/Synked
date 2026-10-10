@@ -39,7 +39,7 @@ def plus(size: int, color: str) -> Image.Image:
     S = size * SUPER
     im = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    arm, t = S * 0.44, S * 0.13          # half-length and half-thickness of each bar
+    arm, t = S * 0.42, S * 0.095         # half-length and half-thickness of each bar
     c = S / 2
     d.rounded_rectangle((c - arm, c - t, c + arm, c + t), radius=int(t * 0.6), fill=color)
     d.rounded_rectangle((c - t, c - arm, c + t, c + arm), radius=int(t * 0.6), fill=color)

@@ -28,7 +28,7 @@ except Exception:  # pragma: no cover
 
 IS_WIN = os.name == "nt"
 APP = "SyncMate"
-VERSION = "1.1"  # shown in Settings, so you can tell which build is running
+VERSION = "1.2"  # shown in Settings, so you can tell which build is running
 SHOW_FLAG = os.path.join(data_dir(), "show.flag")   # "please show your window"
 QUIT_FLAG = os.path.join(data_dir(), "quit.flag")   # "please quit" (used by build.bat)
 ONEDRIVE = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer") or ""
