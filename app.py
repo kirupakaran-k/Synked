@@ -597,7 +597,9 @@ class AddDialog:
         self.a = tk.StringVar()
         self.b = tk.StringVar()
         self._field(f, 1, "Folder A", self.a, "This folder…", self._pick_a)
-        self._field(f, 3, "Folder B", self.b, "…stays identical to this one", self._pick_b)
+        self.b_box = self._field(f, 3, "Folder B", self.b, "…stays identical to this one",
+                                 self._pick_b, combo=True)
+        self.a.trace_add("write", lambda *_: self._suggest())
 
         app.tint(ttk.Label(f, style="Muted.TLabel", wraplength=px(440), justify="left", text=(
             "Tip: pick a folder inside OneDrive as Folder B to back Folder A up to the cloud. "
@@ -626,15 +628,23 @@ class AddDialog:
         dark_titlebar(win, app.theme == "dark")
         win.grab_set()
 
-    def _field(self, f, row, label, var, hint, pick):
+    def _field(self, f, row, label, var, hint, pick, combo=False):
         px = self.app.px
         top = ttk.Frame(f)
         top.grid(row=row, column=0, columnspan=2, sticky="w", pady=(px(6), px(4)))
         ttk.Label(top, text=label, style="Name.TLabel").pack(side="left")
         self.app.tint(ttk.Label(top, text="   " + hint, style="Muted.TLabel")).pack(side="left")
-        e = ttk.Entry(f, textvariable=var, width=52)
+        e = (ttk.Combobox(f, textvariable=var, width=50, values=[]) if combo
+             else ttk.Entry(f, textvariable=var, width=52))
         e.grid(row=row + 1, column=0, sticky="ew")
         ttk.Button(f, text="Browse…", command=pick).grid(row=row + 1, column=1, padx=(px(8), 0))
+        return e
+
+    def _suggest(self):
+        """Offer OneDrive\\<name of Folder A> in Folder B's dropdown (never filled in automatically)."""
+        a = self.a.get().strip().strip('"')
+        name = os.path.basename(os.path.normpath(a)) if a else ""
+        self.b_box.configure(values=[os.path.join(ONEDRIVE, name)] if ONEDRIVE and name else [])
 
     def _pick_a(self):
         p = filedialog.askdirectory(parent=self.win, title="Choose Folder A", mustexist=True)
