@@ -72,5 +72,7 @@ def save_ico(path: str = "syncmate.ico") -> None:
 
 
 if __name__ == "__main__":
-    save_ico()
-    print("wrote syncmate.ico")
+    import sys
+    out = sys.argv[1] if len(sys.argv) > 1 else "syncmate.ico"   # build.bat passes a path
+    save_ico(out)
+    print("wrote", out)

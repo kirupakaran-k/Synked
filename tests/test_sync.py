@@ -572,3 +572,31 @@ def test_live_edit_job_add_and_remove_folders(job, tmp_path):
     time.sleep(1)
     assert not os.path.exists(f"{P['Main']}/after.txt")         # removed folder is ignored
     assert bin_.items == []                                     # nothing re-merged or binned
+
+
+# ------------------------------------------------------------------ settings folder
+
+def test_settings_folder_can_be_chosen(tmp_path, monkeypatch):
+    import store
+    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
+    assert store.data_dir() == store.app_dir() and store.chosen_data_dir() is None
+    elsewhere = tmp_path / "My settings"
+    elsewhere.mkdir()
+    store.set_data_dir(str(elsewhere))
+    assert store.data_dir() == str(elsewhere) and store.data_dir_problem() is None
+    Config(theme="dark").save()                                  # saves into the chosen folder
+    assert (elsewhere / "config.json").exists()
+    store.set_data_dir(None)                                     # back to the default
+    assert store.data_dir() == store.app_dir()
+
+
+def test_missing_settings_folder_falls_back_safely(tmp_path, monkeypatch):
+    import store
+    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
+    gone = tmp_path / "USB drive" / "SyncMate"
+    gone.mkdir(parents=True)
+    store.set_data_dir(str(gone))
+    shutil.rmtree(tmp_path / "USB drive")                        # drive unplugged
+    assert store.data_dir() == store.app_dir()                   # nothing is written there
+    assert "not found" in store.data_dir_problem()
+    assert not gone.exists()

@@ -9,8 +9,9 @@ import uuid
 from dataclasses import asdict, dataclass, field
 
 
-def data_dir() -> str:
-    """Where settings, the state database and the log live."""
+def app_dir() -> str:
+    """SyncMate's fixed home: %APPDATA%\\SyncMate. Holds the pointer to the settings folder
+    and small signal files, so it never moves."""
     base = os.environ.get("SYNCMATE_HOME")
     if not base:
         if os.name == "nt":
@@ -19,6 +20,51 @@ def data_dir() -> str:
             base = os.path.join(os.path.expanduser("~"), ".config", "syncmate")
     os.makedirs(base, exist_ok=True)
     return base
+
+
+LOCATION_FILE = "location.json"
+# The files that make up your SyncMate settings (what moves when you change the folder).
+SETTINGS_FILES = ("config.json", "state.db", "syncmate.log", "syncmate.log.1", "syncmate.log.2")
+
+
+def chosen_data_dir() -> str | None:
+    """The settings folder you picked in Settings, or None for the default."""
+    try:
+        with open(os.path.join(app_dir(), LOCATION_FILE), encoding="utf-8") as f:
+            folder = json.load(f).get("folder")
+        return folder or None
+    except (OSError, ValueError):
+        return None
+
+
+def data_dir() -> str:
+    """Where your syncs (config.json), sync history (state.db) and the log live:
+    the folder chosen in Settings, or %APPDATA%\\SyncMate by default."""
+    chosen = chosen_data_dir()
+    if chosen and os.path.isdir(chosen):
+        return chosen
+    return app_dir()
+
+
+def data_dir_problem() -> str | None:
+    """A message if the chosen settings folder can't be reached (e.g. a drive is unplugged)."""
+    chosen = chosen_data_dir()
+    if chosen and not os.path.isdir(chosen):
+        return f"Settings folder not found: {chosen}"
+    return None
+
+
+def set_data_dir(folder: str | None) -> None:
+    """Point SyncMate at a settings folder (None = back to the default)."""
+    path = os.path.join(app_dir(), LOCATION_FILE)
+    if not folder or os.path.normcase(os.path.abspath(folder)) == os.path.normcase(app_dir()):
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"folder": os.path.abspath(folder)}, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
 
 
 # --------------------------------------------------------------------------- config

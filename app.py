@@ -4,10 +4,11 @@ from __future__ import annotations
 import argparse
 import os
 import queue
+import shutil
 import sys
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 import tkinter.font as tkfont
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -16,11 +17,13 @@ import sv_ttk  # noqa: E402
 from PIL import ImageTk  # noqa: E402
 
 from icon import COLORS, make_icon, save_ico  # noqa: E402
-from store import data_dir  # noqa: E402
+from store import (SETTINGS_FILES, app_dir, chosen_data_dir, data_dir,  # noqa: E402
+                   data_dir_problem, set_data_dir)
+from version import VERSION  # noqa: E402
 from widgets import SlideSwitch, dots, gear, plus  # noqa: E402
 from cards import JobCard  # noqa: E402
-from ui_common import IS_WIN, PALETTE, open_folder  # noqa: E402
-from watcher import Controller  # noqa: E402
+from ui_common import IS_WIN, PALETTE, open_folder, pretty_path  # noqa: E402
+from watcher import Controller, close_file_log  # noqa: E402
 
 try:  # drag-and-drop of folders from File Explorer (optional; app works without it)
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -33,9 +36,8 @@ except Exception:  # pragma: no cover
     darkdetect = None
 
 APP = "SyncMate"
-VERSION = "2.0"  # shown in Settings, so you can tell which build is running
-SHOW_FLAG = os.path.join(data_dir(), "show.flag")   # "please show your window"
-QUIT_FLAG = os.path.join(data_dir(), "quit.flag")   # "please quit" (used by build.bat)
+SHOW_FLAG = os.path.join(app_dir(), "show.flag")   # "please show your window"
+QUIT_FLAG = os.path.join(app_dir(), "quit.flag")   # "please quit" (used by build.bat)
 
 # ============================================================== Windows helpers
 
@@ -132,6 +134,7 @@ class App:
         root.geometry(f"{self.px(820)}x{self.px(640)}")
         root.minsize(self.px(560), self.px(380))
         self._set_window_icon()
+        self._heal_autostart()
 
         self.theme = self._wanted_theme()
         sv_ttk.set_theme(self.theme)
@@ -206,13 +209,23 @@ class App:
                 self.refresh()
         self.root.after(ms, clear)
 
+    @staticmethod
+    def _heal_autostart():
+        """Builds now live in their own 'build <version>' folders. If Start with Windows is
+        on, point it at whichever SyncMate.exe is running now."""
+        try:
+            if get_autostart():
+                set_autostart(True)
+        except OSError:
+            pass
+
     def _set_window_icon(self):
         """Title bar / taskbar icon. On Windows use a real multi-size .ico (crisp at 16 px);
         it's generated fresh from icon.py on every start, so it always matches this build."""
         self._icon_img = ImageTk.PhotoImage(make_icon("synced", 64))
         if IS_WIN:
             try:
-                path = os.path.join(data_dir(), "window.ico")
+                path = os.path.join(app_dir(), "window.ico")
                 save_ico(path)
                 self.root.iconbitmap(default=path)
                 return
@@ -384,10 +397,115 @@ class App:
         self.theme_switch.grid(row=4, column=0, sticky="w")
 
         ttk.Separator(p).grid(row=5, column=0, sticky="ew", pady=px(12))
+        self.tint(ttk.Label(p, text="Settings folder", style="Card.Body.TLabel"), "fg").grid(
+            row=6, column=0, sticky="w")
+        self.loc_label = self.tint(ttk.Label(p, text="", style="Card.Muted.TLabel",
+                                             justify="left", wraplength=px(250)))
+        self.loc_label.grid(row=7, column=0, sticky="w", pady=(px(2), px(8)))
+        locb = tk.Frame(p, background=self.card_bg)
+        locb.grid(row=8, column=0, sticky="w")
+        ttk.Button(locb, text="Change…", command=self.change_settings_folder).pack(side="left")
+        ttk.Button(locb, text="Open", command=lambda: open_folder(data_dir())).pack(
+            side="left", padx=(px(8), 0))
+        self.loc_default_btn = ttk.Button(locb, text="Use default",
+                                          command=self.use_default_settings_folder)
+        self.loc_default_btn.pack(side="left", padx=(px(8), 0))
+        self._refresh_location()
+
+        ttk.Separator(p).grid(row=9, column=0, sticky="ew", pady=px(12))
         ttk.Button(p, text="View activity log", command=self._activity_from_settings).grid(
-            row=6, column=0, sticky="ew")
+            row=10, column=0, sticky="ew")
         self.tint(ttk.Label(p, text=f"{APP} {VERSION}", style="Card.Muted.TLabel")).grid(
-            row=7, column=0, sticky="e", pady=(px(10), 0))
+            row=11, column=0, sticky="e", pady=(px(10), 0))
+
+    # ---------------------------------------------------------------- settings folder
+
+    def _refresh_location(self):
+        custom = chosen_data_dir()
+        where = data_dir()
+        text = pretty_path(where) + ("" if custom else "  (default)")
+        problem = data_dir_problem()
+        if problem:
+            text = problem + "\nUsing the default folder for now."
+        self.loc_label.configure(text=text)
+        if custom:
+            self.loc_default_btn.pack(side="left", padx=(self.px(8), 0))
+        else:
+            self.loc_default_btn.pack_forget()
+
+    def change_settings_folder(self):
+        folder = filedialog.askdirectory(parent=self.root, title="Choose a folder for SyncMate's settings",
+                                         initialdir=data_dir())
+        if folder:
+            self.move_settings(os.path.normpath(folder))
+
+    def use_default_settings_folder(self):
+        self.move_settings(app_dir())
+
+    def move_settings(self, folder: str, use_existing: bool | None = None) -> bool:
+        """Keep SyncMate's settings (your syncs, sync history and log) in `folder`.
+        If that folder already has SyncMate settings, ask whether to use them or replace
+        them. Returns True if the settings folder changed."""
+        old = data_dir()
+        if os.path.normcase(os.path.abspath(folder)) == os.path.normcase(os.path.abspath(old)):
+            return False
+        for j in self.ctrl.jobs():
+            for p in [j.main] + [m.path for m in j.members]:
+                try:
+                    inside = os.path.commonpath([os.path.normcase(os.path.abspath(folder)),
+                                                 os.path.normcase(os.path.abspath(p))])
+                except ValueError:
+                    continue
+                if inside == os.path.normcase(os.path.abspath(p)):
+                    messagebox.showwarning(APP, "Please choose a folder that SyncMate isn't "
+                                                "syncing. Its settings change all the time.",
+                                           parent=self.root)
+                    return False
+        try:  # can we write there?
+            probe = os.path.join(folder, ".syncmate-write-test")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.remove(probe)
+        except OSError as e:
+            messagebox.showerror(APP, f"Can't save settings in that folder:\n{e.strerror or e}",
+                                 parent=self.root)
+            return False
+        if use_existing is None and os.path.exists(os.path.join(folder, "config.json")):
+            answer = messagebox.askyesnocancel(
+                APP, "That folder already has SyncMate settings.\n\n"
+                     "Yes: use the settings that are already there\n"
+                     "No: replace them with your current settings", parent=self.root)
+            if answer is None:
+                return False
+            use_existing = answer
+        use_existing = bool(use_existing)
+
+        # Stop syncing, move the files, start again from the new folder.
+        self.ctrl.stop()
+        close_file_log()
+        if not use_existing:
+            for name in SETTINGS_FILES:
+                src = os.path.join(old, name)
+                if os.path.exists(src):
+                    shutil.copy2(src, os.path.join(folder, name))
+        set_data_dir(folder)
+        if not use_existing:   # it's a move: tidy the old copies away
+            for name in SETTINGS_FILES + ("state.db-wal", "state.db-shm"):
+                try:
+                    os.remove(os.path.join(old, name))
+                except OSError:
+                    pass
+        self.ctrl = Controller()
+        self.ctrl.start()
+        self.ctrl._log("", "info", f"Settings folder is now {data_dir()}")
+        self.expanded, self._draft, self.card_sig = None, False, None
+        self.theme_switch.select(
+            next(i for i, (v, _) in enumerate(self.theme_switch.options)
+                 if v == self.ctrl.config.theme), notify=False)
+        self._apply_theme(self._wanted_theme())
+        self._refresh_location()
+        self.refresh()
+        return True
 
     def _activity_from_settings(self):
         self.hide_settings()
@@ -604,6 +722,9 @@ class App:
                 "paused": "All syncing is paused",
                 "error": "Something needs your attention",
             }[overall]
+        problem = data_dir_problem()
+        if problem:
+            text = problem + " · using the default settings folder"
         if getattr(self, "_summary_override", None):
             text = self._summary_override
         self.summary.configure(text=text)

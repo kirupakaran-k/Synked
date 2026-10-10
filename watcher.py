@@ -84,15 +84,28 @@ class _Handler(FileSystemEventHandler):
 
 
 def _setup_file_log() -> logging.Logger:
+    """The log file lives in the settings folder; follow it if that folder changed."""
     log = logging.getLogger("syncmate")
+    path = os.path.abspath(os.path.join(data_dir(), "syncmate.log"))
+    for h in list(log.handlers):
+        if getattr(h, "baseFilename", None) != path:
+            log.removeHandler(h)
+            h.close()
     if not log.handlers:
-        h = logging.handlers.RotatingFileHandler(
-            os.path.join(data_dir(), "syncmate.log"), maxBytes=1_000_000, backupCount=2,
-            encoding="utf-8")
+        h = logging.handlers.RotatingFileHandler(path, maxBytes=1_000_000, backupCount=2,
+                                                 encoding="utf-8")
         h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         log.addHandler(h)
         log.setLevel(logging.INFO)
     return log
+
+
+def close_file_log() -> None:
+    """Release the log file (so it can be moved to another folder)."""
+    log = logging.getLogger("syncmate")
+    for h in list(log.handlers):
+        log.removeHandler(h)
+        h.close()
 
 
 def _norm(p: str) -> str:

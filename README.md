@@ -8,14 +8,17 @@ moving it.
 
 1. Install Python 3.10 or newer: `winget install Python.Python.3.12`
    (or from python.org; tick **Add python.exe to PATH**).
-2. Double-click **`build.bat`**. A couple of minutes later `SyncMate.exe` appears
-   in this folder.
+2. Double-click **`build.bat`**. A couple of minutes later the app is ready in a folder
+   named after its version, e.g. **`build 2.1\SyncMate.exe`** (with its build log).
+   Each version gets its own build folder, so older builds stay where they are.
 
    To **update** later, just run `build.bat` again. It closes the running SyncMate
-   (letting it finish any copy in progress), deletes the old version, builds the new
-   one, starts it again if it was running, and closes its own window when done.
-   If something goes wrong, the window stays open so you can read why.
-3. Run `SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+   (letting it finish any copy in progress), rebuilds that version's folder, starts the new
+   SyncMate if one was running, and closes its own window when done. If something goes
+   wrong, the window stays open so you can read why. If *Start with Windows* is on, it
+   follows to the newest build the next time that build runs.
+
+3. Run `build 2.1\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
    **connected folders**, and click **Start syncing**. You can also **drag folders from
    File Explorer** onto the boxes or onto the window (several at once: the first becomes
    Main, the rest connected folders).
@@ -76,13 +79,17 @@ If a OneDrive folder holds cloud-only files (cloud icon), SyncMate downloads eac
 the first time it syncs it. To keep things fast, right-click the OneDrive folder and
 choose **Always keep on this device**.
 
-## Where things are kept
+## Where your settings are kept
 
-`%APPDATA%\SyncMate`: settings (`config.json`), sync history (`state.db`) and the
-log (`syncmate.log`). **Activity → Open log file** opens this folder.
+Your folder syncs (`config.json`), their sync history (`state.db`) and the log
+(`syncmate.log`) are kept in `%APPDATA%\SyncMate` by default.
 
-If you move `SyncMate.exe` after turning on *Start with Windows*, switch it off and on
-again so Windows picks up the new location.
+To keep them somewhere else (another drive, a backup folder, or to take them to a new PC),
+open **⚙ settings → Settings folder → Change…** and pick a folder. SyncMate moves the files
+there and carries on syncing. If the folder already has SyncMate settings, you can choose
+to use those or replace them. **Use default** moves them back. Pick a folder SyncMate
+itself isn't syncing. If the chosen folder can't be found (say, a drive is unplugged),
+SyncMate says so and starts with the default folder instead.
 
 ## Files
 
@@ -96,4 +103,5 @@ again so Windows picks up the new location.
 | `engine.py` | The sync rules for each sync type, and version keeping |
 | `store.py` | Jobs, settings and sync history (older single-pair settings are converted automatically) |
 | `icon.py` | Draws the icon |
+| `version.py` | The version number (shown in settings; names the build folder) |
 | `tests/` | Automated tests: `py -m pytest tests` |
