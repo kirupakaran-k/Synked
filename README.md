@@ -10,7 +10,7 @@ moving it.
    (or from python.org; tick **Add python.exe to PATH**).
 2. Double-click **`build.bat`** in the version's folder. A couple of minutes later the app is
    ready in a folder named after its version, **outside** the version folders, e.g.
-   `D:\syncmate\build 3.0\SyncMate.exe` (with its icon and build log).
+   `D:\syncmate\build 3.1\SyncMate.exe` (with its icon and build log).
 
    Version 3 draws its window with **Qt** (PySide6, free and open source). The first build
    downloads it (about 100 MB), so it takes a few minutes; later builds are quick.
@@ -25,7 +25,7 @@ moving it.
    wrong, the window stays open so you can read why. If *Start with Windows* is on, it
    follows to the newest build the next time that build runs.
 
-3. Run `build 3.0\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+3. Run `build 3.1\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
    **connected folders**, and click **Start syncing**. You can also **drag folders from
    File Explorer** onto the boxes or onto the window (several at once: the first becomes
    Main, the rest connected folders).
@@ -95,7 +95,8 @@ an edit in one connected folder reaches Main and from there the other folders.
 | Deleted on one side, edited on the other | The edit wins, so nothing is lost |
 | Changes happen while SyncMate is closed | It catches up when it next starts |
 | A file is open or locked (e.g. in Word) | Retries automatically until it's free |
-| A drive is unplugged or a folder disappears | Pauses that pair, deletes nothing, and resumes when the folder is back |
+| A connected folder's drive is unplugged | Keeps syncing the other folders; that one is shown as *Not connected* and catches up by itself when it's back (deletes nothing meanwhile) |
+| The Main folder disappears | Pauses that folder sync, deletes nothing, and resumes when Main is back |
 | A whole folder is suddenly empty | Stops and asks: restore the files, or delete them on the other side too |
 
 Files that are never synced: Office lock files (`~$…`), `*.tmp`, `desktop.ini`,

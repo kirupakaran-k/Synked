@@ -43,6 +43,8 @@ class Status:
     empty_link: str = ""
     progress: Progress | None = None   # set while files are being copied
     progress_link: str = ""            # which connected folder the progress is for
+    offline: tuple = ()                # connected folders that aren't there right now
+                                       # (e.g. an unplugged drive): skipped until they're back
 
 
 @dataclass
@@ -207,8 +209,12 @@ class Controller:
         if not members:
             return "Add at least one folder to sync with Main."
         folders = [main] + members
-        for p in folders:
-            if not os.path.isdir(p):
+        known = set()
+        if ignore:       # editing: folders this job already has may be unplugged right now
+            old = next((j for j in self.jobs() if j.id == ignore), None)
+            known = {_norm(m.path) for m in old.members} if old else set()
+        for i, p in enumerate(folders):
+            if not os.path.isdir(p) and not (i > 0 and _norm(p) in known):
                 return f"“{p}” is not a folder."
         for i, a in enumerate(folders):
             for b in folders[i + 1:]:
@@ -307,14 +313,31 @@ class Controller:
 
     # --- watching
 
-    def _watch(self, job: Job) -> None:
+    def _watch(self, job: Job, skip=()) -> None:
+        """Watch Main and every connected folder that's there (not the ones in `skip`)."""
         self._unwatch(job.id)
         watches = [self._observer.schedule(_Handler(self, job.id, MAIN, job.main),
                                            job.main, recursive=True)]
         for m in job.members:
-            watches.append(self._observer.schedule(_Handler(self, job.id, m.id, m.path),
-                                                   m.path, recursive=True))
+            if m.id in skip:
+                continue
+            try:
+                watches.append(self._observer.schedule(_Handler(self, job.id, m.id, m.path),
+                                                       m.path, recursive=True))
+            except Exception:        # vanished just now: the health check notices
+                pass
         self._watches[job.id] = watches
+
+    @staticmethod
+    def _offline(job: Job) -> set:
+        """Connected folders that aren't there right now (an unplugged drive, say)."""
+        return {m.id for m in job.members if not os.path.isdir(m.path)}
+
+    @staticmethod
+    def _waiting_for(job: Job, offline: set) -> str:
+        names = [m.path for m in job.members if m.id in offline]
+        return ("Waiting for " + (names[0] if len(names) == 1 else f"{len(names)} folders")
+                + " to be connected")
 
     def _unwatch(self, jid: str) -> None:
         for w in self._watches.pop(jid, []):
@@ -444,13 +467,20 @@ class Controller:
             self._start_job(job)
 
     def _start_job(self, job: Job, allow_empty_link: str = "") -> None:
-        for root in [job.main] + [m.path for m in job.members]:
-            if not os.path.isdir(root):
-                self._unwatch(job.id)
-                self._set(job.id, state="error", message=f"Folder not found: {root}")
-                return
+        if not os.path.isdir(job.main):
+            self._unwatch(job.id)
+            self._set(job.id, state="error", message=f"Folder not found: {job.main}")
+            return
+        offline = self._offline(job)
+        self._set(job.id, offline=tuple(sorted(offline)))
+        if offline and len(offline) == len(job.members):
+            # nothing to sync with yet; Main is still watched so nothing is missed
+            self._watch(job, skip=offline)
+            self._set(job.id, state="waiting", progress=None,
+                      message=self._waiting_for(job, offline))
+            return
         try:
-            self._watch(job)
+            self._watch(job, skip=offline)
         except Exception as e:
             self._set(job.id, state="error", message=f"Can't watch folder: {e}")
             return
@@ -473,13 +503,27 @@ class Controller:
             if j.paused:
                 continue
             st = self.snapshot().get(j.id)
-            missing = next((p for p in [j.main] + [m.path for m in j.members]
-                            if not os.path.isdir(p)), None)
-            if missing and j.id in self._watches:
-                self._unwatch(j.id)
-                self._set(j.id, state="error", message=f"Folder not found: {missing}")
-            elif not missing and st and st.state == "error" and st.message.startswith("Folder not found"):
+            if st is None or st.state == "empty":
+                continue
+            if not os.path.isdir(j.main):
+                if j.id in self._watches:
+                    self._unwatch(j.id)
+                    self._set(j.id, state="error", message=f"Folder not found: {j.main}")
+                    self._log(j.id, "error", f"Folder not found: {j.main}")
+                continue
+            if st.state == "error" and st.message.startswith("Folder not found"):
                 self._log(j.id, "info", "Folder is back — resuming")
+                self._start_job(j)
+                continue
+            # connected folders come and go on their own; the others keep syncing
+            now_off, before = self._offline(j), set(st.offline)
+            if now_off != before:
+                for m in j.members:
+                    if m.id in now_off - before:
+                        self._log(j.id, "warn", f"{m.path} isn't connected — the other "
+                                                "folders keep syncing; it catches up when it's back")
+                    elif m.id in before - now_off:
+                        self._log(j.id, "info", f"{m.path} is back — catching up")
                 self._start_job(j)
 
     def _due_retries(self, now: float) -> None:
@@ -493,7 +537,16 @@ class Controller:
         job = self._job(jid)
         if job is None or job.paused:
             return
-        links = job.links()
+        if not os.path.isdir(job.main):
+            self._unwatch(jid)
+            self._set(jid, state="error", progress=None, message=f"Folder not found: {job.main}")
+            return
+        offline = self._offline(job)
+        links = [link for link in job.links() if link.id not in offline]
+        self._set(jid, offline=tuple(sorted(offline)))
+        if not links:
+            self._set(jid, state="waiting", progress=None, message=self._waiting_for(job, offline))
+            return
         self._set(jid, state="syncing", message="", progress=None)
         failed: list = []   # (where, rel)
 
@@ -540,6 +593,13 @@ class Controller:
                         for rel in _collapse(rs):
                             reconcile(link, rel)
         except RootMissing as e:
+            if e.side == 1 and current is not None:
+                # a connected folder vanished mid-sync (drive unplugged): carry on without it
+                self._log(jid, "warn", f"{e.path} isn't connected — the other folders keep "
+                                       "syncing; it catches up when it's back")
+                self._set(jid, progress=None)
+                self._start_job(self._job(jid))
+                return
             self._unwatch(jid)
             self._set(jid, progress=None, state="error", message=str(e))
             self._log(jid, "error", str(e))

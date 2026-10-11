@@ -617,6 +617,109 @@ def test_live_edit_job_add_and_remove_folders(job, tmp_path):
     assert bin_.items == []                                     # nothing re-merged or binned
 
 
+def _unplug(path):
+    """Like pulling out a USB drive: the folder is simply gone (moved aside)."""
+    os.rename(path, path + ".unplugged")
+
+
+def _plug_in(path):
+    os.rename(path + ".unplugged", path)
+
+
+def test_unplugged_folder_doesnt_stop_the_others(job, monkeypatch):
+    import watcher
+    monkeypatch.setattr(watcher, "HEALTH_EVERY", 0.3)
+    ctrl, P, bin_ = job
+    jid = ctrl.jobs()[0].id
+    backup_id = next(m.id for m in ctrl.jobs()[0].members if m.path == P["Backup"])
+    write(f"{P['Main']}/old.txt", "old")
+    assert wait_for(lambda: os.path.exists(f"{P['Backup']}/old.txt"))
+
+    _unplug(P["Backup"])                                         # the backup drive goes away
+    assert wait_for(lambda: backup_id in ctrl.snapshot()[jid].offline)
+    write(f"{P['Main']}/new.txt", "made while the drive was out")
+    write(f"{P['Two']}/from-two.txt", "two")
+    assert wait_for(lambda: os.path.exists(f"{P['Two']}/new.txt")
+                    and os.path.exists(f"{P['Mirror']}/new.txt")
+                    and os.path.exists(f"{P['Main']}/from-two.txt"))   # the rest keep going
+    st = ctrl.snapshot()[jid]
+    assert st.state == "synced" and backup_id in st.offline
+    assert not os.path.exists(f"{P['Backup']}/new.txt")
+    assert any("isn't connected" in m for _, _, m in ctrl.recent_activity(jid, n=20))
+
+    _plug_in(P["Backup"])                                        # it comes back
+    assert wait_for(lambda: os.path.exists(f"{P['Backup']}/new.txt")
+                    and os.path.exists(f"{P['Backup']}/from-two.txt"))
+    assert wait_for(lambda: ctrl.snapshot()[jid].offline == ())
+    assert read(f"{P['Backup']}/old.txt") == "old"               # nothing lost on the way
+    assert any("is back" in m for _, _, m in ctrl.recent_activity(jid, n=20))
+
+
+def test_two_way_folder_catches_up_on_deletes_after_being_away(job, monkeypatch):
+    import watcher
+    monkeypatch.setattr(watcher, "HEALTH_EVERY", 0.3)
+    ctrl, P, bin_ = job
+    jid = ctrl.jobs()[0].id
+    write(f"{P['Main']}/gone.txt", "x")
+    assert wait_for(lambda: os.path.exists(f"{P['Two']}/gone.txt"))
+    _unplug(P["Two"])
+    assert wait_for(lambda: ctrl.snapshot()[jid].offline)
+    os.remove(f"{P['Main']}/gone.txt")                           # deleted while Two was away
+    assert wait_for(lambda: not os.path.exists(f"{P['Mirror']}/gone.txt"))
+    _plug_in(P["Two"])
+    assert wait_for(lambda: not os.path.exists(f"{P['Two']}/gone.txt"))   # caught up
+    assert not os.path.exists(f"{P['Main']}/gone.txt")           # not brought back to Main
+
+
+def test_all_connected_folders_away_then_back(tmp_path, monkeypatch):
+    import watcher
+    monkeypatch.setattr(watcher, "HEALTH_EVERY", 0.3)
+    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
+    main, usb = str(tmp_path / "Main"), str(tmp_path / "USB")
+    os.makedirs(main), os.makedirs(usb)
+    bin_ = Bin(str(tmp_path / "bin"))
+    os.makedirs(bin_.path)
+    ctrl = Controller(config=Config(), db=StateDB(str(tmp_path / "s.db")), trash=bin_,
+                      debounce=0.3, save_config=False)
+    ctrl.start()
+    try:
+        j = ctrl.add_job(main, [(usb, "update", False)])
+        assert wait_for(lambda: ctrl.overall() == "synced")
+        _unplug(usb)
+        assert wait_for(lambda: ctrl.snapshot()[j.id].state == "waiting")
+        assert "to be connected" in ctrl.snapshot()[j.id].message
+        write(f"{main}/while-away.txt", "x")
+        _plug_in(usb)
+        assert wait_for(lambda: os.path.exists(f"{usb}/while-away.txt"))
+        assert wait_for(lambda: ctrl.snapshot()[j.id].state == "synced")
+    finally:
+        ctrl.stop()
+
+
+def test_main_missing_still_stops_the_job(job, monkeypatch):
+    import watcher
+    monkeypatch.setattr(watcher, "HEALTH_EVERY", 0.3)
+    ctrl, P, bin_ = job
+    jid = ctrl.jobs()[0].id
+    _unplug(P["Main"])
+    assert wait_for(lambda: ctrl.snapshot()[jid].state == "error")
+    assert "Folder not found" in ctrl.snapshot()[jid].message
+    _plug_in(P["Main"])
+    assert wait_for(lambda: ctrl.snapshot()[jid].state == "synced")
+    assert bin_.items == []                                      # nothing deleted anywhere
+
+
+def test_can_edit_a_job_while_one_folder_is_unplugged(job, monkeypatch):
+    import watcher
+    monkeypatch.setattr(watcher, "HEALTH_EVERY", 0.3)
+    ctrl, P, bin_ = job
+    j = ctrl.jobs()[0]
+    _unplug(P["Backup"])
+    paths = [m.path for m in j.members]
+    assert ctrl.validate(j.main, paths, ignore=j.id) is None     # editing is allowed
+    assert ctrl.validate(j.main, paths) is not None              # a brand-new job isn't
+
+
 # ------------------------------------------------------------------ export / import
 
 def test_export_and_import_round_trip(tmp_path):

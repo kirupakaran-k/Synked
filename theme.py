@@ -23,7 +23,7 @@ PALETTES = {
         "button_pressed": "#E9EBEE",
         "line": "#BFC5CC", "track": "#E3E6EA",
         "danger": "#C42B1C", "danger_hover": "#AE2517", "danger_pressed": "#962012",
-        "error": "#C42B1C", "selection": "#CFE3F7",
+        "error": "#C42B1C", "warn": "#9A5B00", "selection": "#CFE3F7",
         "tooltip": "#2B2D31", "on_tooltip": "#F4F5F6",
     },
     "dark": {
@@ -36,7 +36,7 @@ PALETTES = {
         "button_pressed": "#3A3D44",
         "line": "#4D525B", "track": "#363A41",
         "danger": "#C42B1C", "danger_hover": "#AE2517", "danger_pressed": "#962012",
-        "error": "#FF8A80", "selection": "#1F4A6B",
+        "error": "#FF8A80", "warn": "#F0B860", "selection": "#1F4A6B",
         "tooltip": "#3A3D43", "on_tooltip": "#F4F5F6",
     },
 }
@@ -229,6 +229,7 @@ QLabel[role="muted"] {{ color: {p['muted']}; font-size: 9pt; }}
 QLabel[role="body-muted"] {{ color: {p['muted']}; }}
 QLabel[role="section"] {{ font-weight: 600; }}
 QLabel[role="error"] {{ color: {p['error']}; font-size: 9pt; }}
+QLabel[role="warn"] {{ color: {p['warn']}; font-size: 9pt; }}
 QLabel[role="faint"] {{ color: {p['faint']}; font-size: 9pt; }}
 
 /* cards */

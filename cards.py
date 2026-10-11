@@ -375,6 +375,7 @@ class JobCard(QFrame):
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.rows: list[FolderRow] = []
         self.badges: list = []
+        self.branch_rows: dict = {}         # member id -> its row in the folder tree
         self._activity_sig = None
         self._state = {}
 
@@ -477,18 +478,22 @@ class JobCard(QFrame):
         tv.setContentsMargins(0, 8, 0, 0)
         tv.setSpacing(0)
         tv.addWidget(label(folder_name(m.path), "name"))
-        tv.addWidget(label(f"{SHORT_MODE[m.mode]} · "
-                           + elide(pretty_path(os.path.dirname(m.path)) or m.path, 56), "muted"))
+        normal = f"{SHORT_MODE[m.mode]} · " + elide(pretty_path(os.path.dirname(m.path)) or m.path, 56)
+        sub = label(normal, "muted")
+        tv.addWidget(sub)
         h.addWidget(text, 1)
         self.badges.append((badge, m.mode))
+        self.branch_rows[m.id] = {"badge": badge, "mode": m.mode, "sub": sub, "normal": normal,
+                                  "path": m.path, "offline": False}
         return row
 
     def retheme(self):
         c = theme.pal()
-        for badge, mode in self.badges:
-            badge.setPixmap(theme.badge_pixmap(ARROW_KIND[mode], c["accent"], c["on_accent"],
-                                               30, 22, self.devicePixelRatioF() or 2))
-            badge.setFixedSize(30, 22)
+        for mid, r in self.branch_rows.items():
+            fill, mark = (c["track"], c["faint"]) if r["offline"] else (c["accent"], c["on_accent"])
+            r["badge"].setPixmap(theme.badge_pixmap(ARROW_KIND[r["mode"]], fill, mark,
+                                                    30, 22, self.devicePixelRatioF() or 2))
+            r["badge"].setFixedSize(30, 22)
         if not self.is_new:
             self.more.setIcon(theme.dots_icon(c["text"], 20))
         else:
@@ -713,6 +718,21 @@ class JobCard(QFrame):
             self.status.style().unpolish(self.status)
             self.status.style().polish(self.status)
         set_text(self.status, describe(st, job))
+        offline = set(getattr(st, "offline", ()) or ())
+        if self._state.get("offline") != offline:
+            self._state["offline"] = offline
+            for mid, r in self.branch_rows.items():
+                off = mid in offline
+                r["offline"] = off
+                r["sub"].setText("Not connected · syncs again when it's back" if off else r["normal"])
+                r["sub"].setProperty("role", "warn" if off else "muted")
+                r["sub"].style().unpolish(r["sub"])
+                r["sub"].style().polish(r["sub"])
+                r["badge"].setToolTip(f"{r['path']} isn't connected right now (an unplugged "
+                                      "drive?). The other folders keep syncing; this one catches "
+                                      "up by itself when it's back." if off
+                                      else MODE_HELP[r["mode"]])
+            self.retheme()
         p = st.progress
         busy = st.state == "syncing" and p is not None and p.items_total > 0
         if busy:

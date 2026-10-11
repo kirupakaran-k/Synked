@@ -75,8 +75,12 @@ def _dest_name(st, job) -> str:
 
 def describe(st, job) -> str:
     """The main status line for a sync job."""
+    off = len(getattr(st, "offline", ()) or ())
     if st.state == "synced":
-        return f"In sync · synced {synced_at(st.last_sync)}" if st.last_sync else "In sync"
+        text = f"In sync · synced {synced_at(st.last_sync)}" if st.last_sync else "In sync"
+        if off:
+            text += f" · {off} folder{'s' if off > 1 else ''} not connected"
+        return text
     if st.state in ("syncing", "starting"):
         p = st.progress
         if p is None or not p.items_total:
