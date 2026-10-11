@@ -1,4 +1,4 @@
-"""Draws the SyncMate icon: a retro striped sync loop in blues, on a pale-blue tile.
+"""Draws the Synked icon: a retro striped sync loop in blues, on a pale-blue tile.
 
 The logo itself never changes; a small coloured dot in the corner shows the status
 (no dot = everything is in sync).
@@ -66,13 +66,13 @@ def make_icon(state: str = "synced", size: int = 64) -> Image.Image:
     return im.resize((size, size), Image.LANCZOS)
 
 
-def save_ico(path: str = "syncmate.ico") -> None:
+def save_ico(path: str = "synked.ico") -> None:
     make_icon("synced", 256).save(
         path, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 
 
 if __name__ == "__main__":
     import sys
-    out = sys.argv[1] if len(sys.argv) > 1 else "syncmate.ico"   # build.bat passes a path
+    out = sys.argv[1] if len(sys.argv) > 1 else "synked.ico"   # build.bat passes a path
     save_ico(out)
     print("wrote", out)

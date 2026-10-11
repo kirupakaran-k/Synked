@@ -1,4 +1,4 @@
-"""SyncMate — keep folders in sync, continuously. The window (Qt / PySide6)."""
+"""Synked — keep folders in sync, continuously. The window (Qt / PySide6)."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QParallelAnimationGroup,  # noqa: E402
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QParallelAnimationGroup,  # noqa: E402
                             QPoint, QPropertyAnimation, QSize, Qt, QTimer)
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPalette, QPixmap  # noqa: E402
 from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QFrame,  # noqa: E402
@@ -22,25 +22,24 @@ import theme  # noqa: E402
 from cards import JobCard, button, label  # noqa: E402
 from controls import Segmented, ToggleSwitch, dropped_folders  # noqa: E402
 from icon import make_icon  # noqa: E402
-from store import (CONFIG_EXT, Member, app_dir, data_dir, export_settings,  # noqa: E402
-                   read_settings_file)
+from store import (CONFIG_EXT, OLD_APP_NAME, Member, app_dir, data_dir,  # noqa: E402
+                   export_settings, migrate_old_home, old_app_dir, read_settings_file)
 from ui_common import IS_WIN, elide, open_folder  # noqa: E402
-from version import VERSION  # noqa: E402
+from version import APP, COMPANY, CREDIT, VERSION  # noqa: E402
 from watcher import Controller, _overlaps  # noqa: E402
 
-APP = "SyncMate"
 SHOW_FLAG = os.path.join(app_dir(), "show.flag")   # "please show your window"
 QUIT_FLAG = os.path.join(app_dir(), "quit.flag")   # "please quit" (used by build.bat)
 
 
 # ============================================================== Windows helpers
 def single_instance(signal: str = SHOW_FLAG) -> bool:
-    """True if we're the only SyncMate running. Otherwise pass `signal` to the running one."""
+    """True if we're the only Synked running. Otherwise pass `signal` to the running one."""
     if not IS_WIN:
         return True
     import ctypes
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    single_instance.handle = k32.CreateMutexW(None, False, "Local\\SyncMate.SingleInstance")
+    single_instance.handle = k32.CreateMutexW(None, False, "Local\\Synked.SingleInstance")
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         open(signal, "w").close()
         return False
@@ -57,6 +56,43 @@ def dark_titlebar(win: QWidget, dark: bool) -> None:
                                                    ctypes.sizeof(val))
     except Exception:
         pass
+
+
+def stop_old_app(wait: float = 8.0) -> None:
+    """If SyncMate (this app before it was renamed) is still running, ask it to quit and
+    wait for it, so the two never sync the same folders at once."""
+    if not IS_WIN:
+        return
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenMutexW.restype = ctypes.c_void_p
+
+    def running() -> bool:
+        h = k32.OpenMutexW(0x00100000, False, "Local\\SyncMate.SingleInstance")  # SYNCHRONIZE
+        if h:
+            k32.CloseHandle(ctypes.c_void_p(h))
+        return bool(h)
+
+    if not running():
+        return
+    try:
+        open(os.path.join(old_app_dir(), "quit.flag"), "w").close()
+    except OSError:
+        return
+    end = time.monotonic() + wait
+    while running() and time.monotonic() < end:
+        time.sleep(0.25)
+
+
+def carry_over_old_data() -> None:
+    """First start after the rename: bring your folder syncs and sync history over from
+    SyncMate, and move Start with Windows to the new name."""
+    stop_old_app()
+    try:
+        migrate_old_home(app_dir(), old_app_dir())
+    except OSError:
+        pass
+    migrate_autostart()
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -94,6 +130,24 @@ def set_autostart(on: bool) -> None:
                 winreg.DeleteValue(k, APP)
             except OSError:
                 pass
+
+
+def migrate_autostart() -> None:
+    """SyncMate's Start with Windows entry becomes Synked's (pointing at this exe)."""
+    if not IS_WIN:
+        return
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as k:
+            try:
+                winreg.QueryValueEx(k, OLD_APP_NAME)
+            except OSError:
+                return
+            winreg.SetValueEx(k, APP, 0, winreg.REG_SZ, autostart_command())
+            winreg.DeleteValue(k, OLD_APP_NAME)
+    except OSError:
+        pass
 
 
 def pil_to_pixmap(img) -> QPixmap:
@@ -160,8 +214,8 @@ class SettingsFlyout(QWidget):
         b = button("View activity log")
         b.clicked.connect(lambda: (self.hide(), win.show_activity()))
         v.addWidget(b)
-        foot = label(f"{APP} {VERSION} - By Er.K.K.", "faint")
-        foot.setAlignment(Qt.AlignRight)
+        foot = label(f"{APP} (version {VERSION}) by {COMPANY}\n{CREDIT}", "faint")
+        foot.setAlignment(Qt.AlignHCenter)
         v.addWidget(foot)
         self.hidden_at = 0.0
         self.fade = QPropertyAnimation(self, b"windowOpacity", self)
@@ -202,7 +256,7 @@ class ActivityWindow(QDialog):
     def __init__(self, win: "MainWindow"):
         super().__init__(win)
         self.win = win
-        self.setWindowTitle("SyncMate — Activity")
+        self.setWindowTitle(f"{APP} — Activity")
         self.resize(760, 440)
         v = QVBoxLayout(self)
         v.setContentsMargins(18, 16, 18, 16)
@@ -251,6 +305,7 @@ class MainWindow(QMainWindow):
         self.cards: dict = {}
         self.card_sig = None
         self.expanded = None          # key of the open card: a job id, "new", or None
+        self._scroll_plan = None      # how the list scrolls while cards open/close
         self._draft = False
         self._summary_override = None
         self.activity_win = None
@@ -454,6 +509,7 @@ class MainWindow(QMainWindow):
         self.list.setUpdatesEnabled(False)
         self._clear_list()
         self.cards = {}
+        self._scroll_plan = None      # it may refer to cards that are now gone
         if self._draft:
             card = self.cards["new"] = JobCard(self)
             if kept:
@@ -545,20 +601,35 @@ class MainWindow(QMainWindow):
             card.expand()
 
     def new_sync(self, prefill=()) -> None:
-        """Show the blank 'New folder sync' card at the top of the list, opening."""
+        """Show the blank 'New folder sync' card at the top of the list, opening. If another
+        sync is open, it closes first and the new card opens right after."""
         self.flyout.hide()
         if not self._draft:
-            if self.expanded is not None and self.expanded in self.cards:
-                self.cards[self.expanded].collapse()
-            self._draft = True
-            self.expanded = "new"
-            self.refresh()
-            card = self.cards["new"]
-            card.expand(reset=False)
+            old = self.cards.get(self.expanded) if self.expanded is not None else None
+            if old is not None and old.opened:
+                self.expanded = None
+                # (opened a moment later, once the closing card has fully finished)
+                old.collapse(then=lambda: QTimer.singleShot(0, lambda: self._open_draft(prefill)))
+                return
+            self._open_draft(prefill)
+            return
         card = self.cards["new"]
         if prefill:
             card.fill(prefill)
-        self.scroll.verticalScrollBar().setValue(0)
+        if not self._animating():
+            self.scroll.verticalScrollBar().setValue(0)
+        card.main_box.setFocus()
+
+    def _open_draft(self, prefill=()) -> None:
+        if self._draft:
+            return
+        self._draft = True
+        self.expanded = "new"
+        self.refresh()
+        card = self.cards["new"]
+        card.expand(reset=False)
+        if prefill:
+            card.fill(prefill)
         card.main_box.setFocus()
 
     def close_draft(self) -> None:
@@ -579,6 +650,91 @@ class MainWindow(QMainWindow):
             sb.setValue(min(top, bottom - view))
         elif top < sb.value():
             sb.setValue(top)
+
+    # While cards open or close, one place decides where the list is scrolled. It works
+    # from the animations' own numbers (how much of each editor shows), not from widget
+    # positions, which Qt only updates a moment later: reading those made the list jump.
+    def drawer_step(self, card: QWidget) -> None:
+        if card.parent() is None:
+            return
+        sb = self.scroll.verticalScrollBar()
+        plan = self._scroll_plan
+        if plan is None:
+            plan = self._scroll_plan = {"cards": {}, "max0": sb.maximum(),
+                                        "view": self.scroll.viewport().height(), "how": None}
+        ents = plan["cards"]
+        if card not in ents:
+            # where it would be if every card already moving were still at its start
+            y = card.y() - sum(c.drawer.height() - e["h0"] for c, e in ents.items()
+                               if c.y() < card.y())
+            ents[card] = {"y0": y, "h0": card.drawer.shown,
+                          "base": card.height() - card.drawer.height()}
+            plan["how"] = None               # something new is moving: plan again from here
+        now = {c: c.drawer.shown for c in ents}
+        last = max(0, plan["max0"] + sum(now[c] - e["h0"] for c, e in ents.items()))
+
+        def top_of(c):
+            y0 = ents[c]["y0"]
+            return y0 + sum(now[d] - ents[d]["h0"] for d in ents if ents[d]["y0"] < y0)
+
+        def progress(c, h_from, h_to):
+            span = h_to - h_from
+            return 1.0 if span == 0 else max(0.0, min(1.0, (now[c] - h_from) / span))
+
+        view = plan["view"]
+        opening = [c for c in ents if c.drawer.opened]
+        if opening:
+            # Keep the opening card in view: as it grows, the list follows its bottom until
+            # its top reaches the top of the window, and its top never leaves the view. If
+            # part of it was already out of view, that part comes in gradually, in step with
+            # the curtain, instead of with a jump.
+            c = opening[-1]
+            top = top_of(c)
+            bottom = top + ents[c]["base"] + now[c]
+            if plan["how"] is None:
+                s0 = sb.value()
+                plan["how"] = ("open", c, now[c], self._end_height(c),
+                               max(0, bottom - (s0 + view)), max(0, s0 - top))
+            _, c, h_from, h_to, below, above = plan["how"]
+            left = 1.0 - progress(c, h_from, h_to)
+            pos = sb.value()
+            pos = max(pos, bottom - view - below * left)
+            pos = min(pos, top + above * left)
+        else:
+            # Only closing. Its top in view: nothing above it moves. Its top scrolled out
+            # above: the list glides up as it shrinks (never past its top), so the syncs
+            # below stay still. Toward the end of the list it glides down with it. All in
+            # one smooth glide, planned when the closing started.
+            if plan["how"] is None:
+                c = min(ents, key=lambda d: ents[d]["y0"])
+                s0, top, h_to = sb.value(), top_of(c), self._end_height(c)
+                end = s0 if top >= s0 else max(top, s0 - (now[c] - h_to))
+                last_end = max(0, plan["max0"] + sum(
+                    self._end_height(d) - e["h0"] for d, e in ents.items()))
+                plan["how"] = ("close", c, now[c], h_to, s0, max(0, min(end, last_end)))
+            _, c, h_from, h_to, s0, end = plan["how"]
+            pos = s0 + (end - s0) * progress(c, h_from, h_to)
+        pos = round(max(0, min(pos, last)))
+        self._sync_list()
+        if sb.maximum() < pos:          # (only if Qt still hasn't measured the new length)
+            sb.setRange(0, last)
+        sb.setValue(pos)
+
+    @staticmethod
+    def _end_height(card) -> int:
+        """How much of a card's editor will show when its curtain stops."""
+        a = card.drawer.anim
+        return int(a.endValue()) if a.state() == QAbstractAnimation.Running else card.drawer.shown
+
+    def drawer_settled(self) -> None:
+        if not self._animating():
+            self._scroll_plan = None
+
+    def _sync_list(self) -> None:
+        """Lay the list out now, not a moment later: otherwise one frame can show the new
+        scroll position with the cards still at their old places, which looks like a jump."""
+        self.list_box.activate()
+        QApplication.sendEvent(self.scroll, QEvent(QEvent.LayoutRequest))
 
     # ---------------------------------------------------------------- checks
     def prepare_folders(self, main: str, members: list, ignore=None):
@@ -623,7 +779,7 @@ class MainWindow(QMainWindow):
     # ---------------------------------------------------------------- summary
     def _update_summary(self, jobs, snap):
         if not jobs:
-            text = "Add a folder sync and SyncMate keeps your folders identical."
+            text = f"Add a folder sync and {APP} keeps your folders identical."
         else:
             overall = self.ctrl.overall()
             states = {st.state for st in snap.values()}
@@ -700,7 +856,7 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _heal_autostart():
-        """If Start with Windows is on, point it at whichever SyncMate.exe is running now."""
+        """If Start with Windows is on, point it at whichever Synked.exe is running now."""
         try:
             if get_autostart():
                 set_autostart(True)
@@ -724,8 +880,8 @@ class MainWindow(QMainWindow):
         if path is None:
             path, _ = QFileDialog.getSaveFileName(
                 self, "Export folder sync configurations",
-                f"SyncMate folder syncs {time.strftime('%Y-%m-%d')}{CONFIG_EXT}",
-                f"SyncMate configuration (*{CONFIG_EXT});;All files (*.*)")
+                f"{APP} folder syncs {time.strftime('%Y-%m-%d')}{CONFIG_EXT}",
+                f"{APP} configuration (*{CONFIG_EXT});;All files (*.*)")
             if not path:
                 return False
             if not os.path.splitext(path)[1]:
@@ -745,7 +901,7 @@ class MainWindow(QMainWindow):
         if path is None:
             path, _ = QFileDialog.getOpenFileName(
                 self, "Import folder sync configurations", "",
-                f"SyncMate configuration (*{CONFIG_EXT});;Older exports (*.json);;All files (*.*)")
+                f"{APP} configuration (*{CONFIG_EXT});;Older exports (*.json);;All files (*.*)")
             if not path:
                 return 0
         try:
@@ -820,7 +976,7 @@ class MainWindow(QMainWindow):
             return
         tray = self.tray = QSystemTrayIcon(app_icon(), self)
         menu = QMenu()
-        menu.addAction("Open SyncMate", self.show_window)
+        menu.addAction(f"Open {APP}", self.show_window)
         menu.addAction("Sync now", lambda: self.ctrl.sync_now())
         self.pause_all = menu.addAction("Pause all", self._toggle_all)
         menu.addSeparator()
@@ -862,7 +1018,7 @@ class MainWindow(QMainWindow):
         self.hide()
         if not self.ctrl.config.tray_hint_shown:
             self.ctrl.remember(tray_hint_shown=True)
-            self.tray.showMessage(APP, "SyncMate keeps syncing in the background. "
+            self.tray.showMessage(APP, f"{APP} keeps syncing in the background. "
                                        "Open it again from the tray icon.", app_icon(), 5000)
 
     def _shutdown(self):
@@ -905,7 +1061,7 @@ def make_app(argv=None) -> QApplication:
     if IS_WIN:
         try:   # own taskbar button and icon, not python's
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ErKK.SyncMate")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("EagerSoftech.Synked")
         except Exception:
             pass
     QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
@@ -925,7 +1081,7 @@ def make_app(argv=None) -> QApplication:
 def main():
     ap = argparse.ArgumentParser(prog=APP)
     ap.add_argument("--background", action="store_true", help="start hidden in the tray")
-    ap.add_argument("--quit", action="store_true", help="ask a running SyncMate to close")
+    ap.add_argument("--quit", action="store_true", help="ask a running Synked to close")
     args = ap.parse_args()
     if args.quit:
         single_instance(QUIT_FLAG)  # signals the running copy, if there is one
@@ -937,6 +1093,7 @@ def main():
             os.remove(flag)
         except OSError:
             pass
+    carry_over_old_data()
     app = make_app()
     ctrl = Controller()
     ctrl.start()

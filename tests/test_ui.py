@@ -14,7 +14,7 @@ pytest.importorskip("PySide6")
 
 @pytest.fixture
 def ui(tmp_path, monkeypatch):
-    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "appdata"))
+    monkeypatch.setenv("SYNKED_HOME", str(tmp_path / "appdata"))
     import app as A
     from watcher import Controller
     qapp = A.make_app([])

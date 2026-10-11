@@ -8,7 +8,8 @@ from __future__ import annotations
 import os
 import time
 
-from PySide6.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation,
+                            Signal)
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QProgressBar, QPushButton, QSizePolicy,
@@ -83,10 +84,11 @@ class Drawer(QWidget):
         # Each step sets the drawer's height AND the card's height together, so the card
         # grows/shrinks by exactly the part being revealed: nothing else moves or stretches.
         self.anim = QVariantAnimation(self)
-        self.anim.valueChanged.connect(self._step)
+        self.anim.valueChanged.connect(self._anim_step)
         self.anim.finished.connect(self._done)
         self._then = None
         self._base = 0
+        self.shown = 0          # how much of the editor shows right now (pixels)
 
     # its natural height is the editor's height at this width
     def full_height(self, w: int | None = None) -> int:
@@ -121,8 +123,15 @@ class Drawer(QWidget):
     def _card(self) -> QWidget:
         return self.parentWidget()
 
+    def _anim_step(self, v):
+        # Qt also reports a value when the start/end are being set up, before the slide
+        # runs; acting on that would flash the card to its end size for an instant.
+        if self.anim.state() == QAbstractAnimation.Running:
+            self._step(v)
+
     def _step(self, v):
         v = int(v)
+        self.shown = v
         self.setMaximumHeight(v)
         self._card().setFixedHeight(self._base + v)
 
@@ -155,6 +164,7 @@ class Drawer(QWidget):
         if not animate:
             self._release()
             self.setMaximumHeight(QWIDGETSIZE_MAX)
+            self.shown = target
             return
         self._step(start)
         self.anim.setDuration(self.OPEN_MS)
@@ -169,6 +179,7 @@ class Drawer(QWidget):
         self.anim.stop()
         if not self.isVisible() or not animate:
             self._release()
+            self.shown = 0
             self.setMaximumHeight(0)
             self.setVisible(False)
             self._finish_then()
@@ -490,7 +501,9 @@ class JobCard(QFrame):
         # ---- editor, in a drawer that opens like a curtain ------------------------
         self.editor = self._build_editor()
         self.drawer = Drawer(self.editor)
-        self.drawer.anim.valueChanged.connect(lambda _: self.win.keep_visible(self))
+        # every step of the curtain lets the window keep the list's scroll position in step
+        self.drawer.anim.valueChanged.connect(self._drawer_step)
+        self.drawer.anim.finished.connect(self.win.drawer_settled)
         outer.addWidget(self.drawer)
         self.retheme()
 
@@ -732,6 +745,10 @@ class JobCard(QFrame):
             self._show_activity()
         self._set_open(True)
         self.drawer.open(animate)
+
+    def _drawer_step(self, _v):
+        if self.drawer.anim.state() == QAbstractAnimation.Running:
+            self.win.drawer_step(self)
 
     def collapse(self, then=None, animate: bool = True):
         self._set_open(False)

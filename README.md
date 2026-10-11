@@ -1,146 +1,106 @@
-# SyncMate
+# Synked
 
-Keeps any two folders identical, continuously and in both directions. Point one side
-at a folder inside OneDrive and that folder is backed up to the cloud, without
-moving it.
+**Keeps your folders in sync, continuously.** A small, free Windows app: pick a Main folder and
+any number of connected folders (another drive, a USB disk, a folder inside OneDrive) and Synked
+keeps them identical in the background, the moment anything changes.
 
-## Get it running
+*Synked by EAGER - Softech · An engineering by Er. K.K.*
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/list-dark.png">
+  <img alt="Synked's main window with three folder syncs" src="docs/screenshots/list-light.png" width="720">
+</picture>
+
+## What it does
+
+- **Continuous sync.** Changes are copied within seconds, while you work. No schedules, no
+  "Sync" button to remember.
+- **One Main folder, many connected folders**, each with its own way of syncing:
+
+  | Type | Direction | What it does |
+  |---|---|---|
+  | **Two-way** | Main ⇄ folder | Changes flow both ways; if both sides changed, the newer one wins |
+  | **Mirror** | Main → folder | The folder becomes an exact copy of Main |
+  | **Update** | Main → folder | New and changed files are copied; nothing is ever deleted (good for backups) |
+  | **Collect** | folder → Main | New and changed files are gathered into Main; nothing is ever deleted |
+
+- **Nothing is lost.** Deleted or replaced files go to the **Recycle Bin**, or into a hidden
+  `.synked-versions` folder, one dated folder per sync, kept for as many days as you choose (or forever).
+- **Renames are mirrored** without re-copying. Copies are written to a temporary file and swapped
+  in at the end, so a crash or power cut never leaves a half-written file.
+- **Unplugged drives don't stop anything.** The other folders keep syncing; the missing one
+  catches up by itself when it's back.
+- **Pause a single folder** while the rest keep going.
+- Drag and drop folders, live progress, light / dark / auto theme, tray icon, Start with
+  Windows, and **export / import** of all your syncs as a `.kiru` file.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/editor-dark.png">
+  <img alt="Editing a folder sync: Main folder, connected folders, sync types and old-file options" src="docs/screenshots/editor-light.png" width="720">
+</picture>
+
+## Download
+
+Get **`Synked.exe`** from the [latest release](https://github.com/kirupakaran-k/synked/releases/latest)
+and run it. Nothing to install. Windows 10 or 11.
+
+The app isn't code-signed, so the first time Windows SmartScreen may say *"Windows protected
+your PC"*: click **More info → Run anyway**.
+
+## Build it yourself
 
 1. Install Python 3.10 or newer: `winget install Python.Python.3.12`
-   (or from python.org; tick **Add python.exe to PATH**).
-2. Double-click **`build.bat`** in the version's folder. A couple of minutes later the app is
-   ready in a folder named after its version, **outside** the version folders, e.g.
-   `D:\syncmate\build 3.2\SyncMate.exe` (with its icon and build log).
+2. Double-click **`build.bat`**. It sets up the build tools (Qt is about 100 MB the first time),
+   shows its progress, and puts `Synked.exe` in a `build <version>` folder next to this one.
 
-   Version 3 draws its window with **Qt** (PySide6, free and open source). The first build
-   downloads it (about 100 MB), so it takes a few minutes; later builds are quick.
-   The build tools (Python libraries) are kept in
-   `%LOCALAPPDATA%\SyncMate\build-env`, not in your SyncMate folder, and are reused by every
-   build. No `.venv` or `__pycache__` folders are left behind; leftovers from older builds
-   are removed. You don't need any of them to *run* SyncMate, only to build it.
+Or run it straight from source: `py -m pip install -r requirements.txt`, then `py app.py`.
+Tests: `py -m pip install pytest`, then `py -m pytest tests`.
 
-   To **update** later, just run `build.bat` again. It closes the running SyncMate
-   (letting it finish any copy in progress), rebuilds that version's build folder, starts the
-   new SyncMate if one was running, and closes its own window when done. If something goes
-   wrong, the window stays open so you can read why. If *Start with Windows* is on, it
-   follows to the newest build the next time that build runs.
+The full user guide (sync types, old versions, what happens when, where settings are kept) is in
+[docs/USER-GUIDE.md](docs/USER-GUIDE.md).
 
-3. Run `build 3.2\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
-   **connected folders**, and click **Start syncing**. You can also **drag folders from
-   File Explorer** onto the boxes or onto the window (several at once: the first becomes
-   Main, the rest connected folders).
+## Version history
 
-   Each folder sync shows its Main folder on top with a tree branching down to every
-   connected folder, each with a badge for how it syncs (⇄ two-way, → Main to folder,
-   ← folder to Main). It shows live progress while it copies (current file, items and MB done,
-   and a progress bar), then the time and day it last synced. **Click a folder sync** (or
-   its ⋮ button) to expand it: change folders, sync types and options, add or remove
-   connected folders and **Apply**; Pause / Resume, Sync now, see its **recent activity**,
-   or Remove it.
+Every version is kept here as its own commit and tag, from the very first build. Pick one under
+[Releases](https://github.com/kirupakaran-k/synked/releases) or [Tags](https://github.com/kirupakaran-k/synked/tags)
+to see or download exactly that version's code. What changed each time is in
+[CHANGELOG.md](CHANGELOG.md). Up to 3.2 the app was called **SyncMate**.
 
-   Each connected folder has a blue **pause** button (left of its red ✕): it pauses just that
-   folder while the others keep syncing, and turns into a play button to resume it. A resumed
-   folder catches up on everything it missed.
-
-   Qt draws the whole window off-screen and shows only finished pictures, so nothing is
-   ever seen half-drawn: a folder sync slides open downward like a curtain (and back up),
-   switching theme cross-fades to the new colours, and the settings menu fades and slides
-   in. The window rearranges itself when you make it narrow (rows wrap).
-   The **⚙ settings** button (top right) has Start with Windows, the Theme slider
-   (Auto / Light / Dark), **Export / Import** of your folder sync configurations, and the full
-   activity log.
-
-You can also run it without building: `py app.py`
-(after `py -m pip install -r requirements.txt`).
-
-## Sync types (chosen per connected folder)
-
-Hover over a sync type or an old-files choice in SyncMate (also inside the open dropdown
-list) to see what it does.
-
-Every connected folder syncs with the job's **Main folder**. Changes pass through Main, so
-an edit in one connected folder reaches Main and from there the other folders.
-
-| Type | Direction | What it does |
-|---|---|---|
-| **Two-way** | Main ⇄ folder | Changes flow both ways; if both sides changed, the newer one wins |
-| **Mirror** | Main → folder | The folder becomes an exact copy of Main (master/slave): extra files are removed and its own edits are undone |
-| **Update** | Main → folder | Incremental: new and changed files are copied; nothing is ever deleted. Good for backups |
-| **Collect** | folder → Main | The same, the other way: new and changed files are added to Main, never deleted |
-
-**Old files** (also per connected folder):
-- **Recycle Bin**: files that are removed, or a copy's own edits that get overwritten, go to the Recycle Bin.
-- **Keep old versions**, for as long as you choose: drag the slider (1 day up to 1 year, or all
-  the way right for forever) or type any number of days in the box next to it: every replaced or removed file is moved into the hidden `.syncmate-versions`
-  folder at the top of that synced folder instead (deleting a subfolder never touches it). Each
-  sync gets its own folder there, named by date, time and a number, with the old files
-  inside in their usual subfolders:
-
-  ```
-  Backup\.syncmate-versions\
-      2026-10-09_17-42-10_001\Reports\budget.xlsx
-      2026-10-10_12-38-05_001\Reports\budget.xlsx
-                              \Notes\plan.docx
-  ```
-
-  To get something back, open the dated folder and copy the file out. Dated folders older
-  than the chosen number of days are removed automatically after each full sync. Main's
-  `.syncmate-versions` (used when two-way or collect folders replace files in Main) is kept
-  for the longest time any of its folders asks for.
-
-## How it behaves
-
-| What happens | What SyncMate does |
+| | Highlights |
 |---|---|
-| A file is added or edited on one side | Copies it to the other side within a few seconds |
-| A file or folder is deleted | Deletes it on the other side by sending it to the **Recycle Bin** |
-| A file or folder is renamed or moved | Renames it on the other side too, with no re-copying |
-| The same file changed on both sides | The **newer one wins**; the older one goes to the Recycle Bin |
-| Deleted on one side, edited on the other | The edit wins, so nothing is lost |
-| Changes happen while SyncMate is closed | It catches up when it next starts |
-| A file is open or locked (e.g. in Word) | Retries automatically until it's free |
-| A connected folder's drive is unplugged | Keeps syncing the other folders; that one is shown as *Not connected* and catches up by itself when it's back (deletes nothing meanwhile) |
-| The Main folder disappears | Pauses that folder sync, deletes nothing, and resumes when Main is back |
-| A whole folder is suddenly empty | Stops and asks: restore the files, or delete them on the other side too |
+| **3.x** | Qt window with smooth animations; unplugged drives don't stop a sync; pause single folders; renamed to Synked |
+| **2.x** | Multi-folder syncs and sync types; export / import (`.kiru`); dated old-version folders; hover hints |
+| **1.x** | First two-way folder-pair sync; themes; settings; drag and drop; live progress |
 
-Files that are never synced: Office lock files (`~$…`), `*.tmp`, `desktop.ini`,
-`Thumbs.db`, and partial downloads.
+## How it's made
 
-Every copy is written to a temporary file first and swapped in at the end, so a
-crash or power cut never leaves a half-written file.
-
-## OneDrive tip
-
-If a OneDrive folder holds cloud-only files (cloud icon), SyncMate downloads each one
-the first time it syncs it. To keep things fast, right-click the OneDrive folder and
-choose **Always keep on this device**.
-
-## Where your settings are kept, and exporting them
-
-Your folder syncs (`config.json`), their sync history (`state.db`) and the log
-(`syncmate.log`) are kept in `%APPDATA%\SyncMate`.
-
-**⚙ settings → Folder sync configurations → Export** saves all your folder syncs (folders,
-sync types, old-files options, paused or not) and the theme to a **`.kiru`** file wherever you
-like. **Import** loads such a file (or an older `.json` export), on this PC or another one.
-You can **replace** your current syncs or **add** to them; syncs that would overlap folders
-already being synced are skipped. Folders that don't exist on this PC yet are imported
-anyway: those syncs wait and start by themselves when the folders appear. Sync history isn't
-exported, because it belongs to this PC's copies of the files; after an import the folders
-are compared once.
-
-## Files
+Python, with [PySide6 / Qt](https://doc.qt.io/qtforpython-6/) for the window,
+[watchdog](https://github.com/gorakhargosh/watchdog) to notice changes,
+[Send2Trash](https://github.com/arsenetar/send2trash) for the Recycle Bin and
+[Pillow](https://python-pillow.org/) to draw the icon. The sync engine compares each side
+with a small SQLite record of how things looked after the last sync, so it can tell an edit
+from a delete and which side changed.
 
 | File | Purpose |
 |---|---|
-| `app.py` | Window, tray icon, settings menu, activity log, export/import, start-with-Windows |
-| `cards.py` | The folder-sync cards: the folder tree, status, live progress, and the editor that slides open |
-| `controls.py` | Toggle switch, theme picker, wrapping rows, tree lines, folder boxes that take dropped folders |
-| `theme.py` | Light and dark colours, the window's style sheet, and the icons (drawn in code) |
-| `ui_common.py` | Shared helpers (paths, times, sizes) |
-| `watcher.py` | Watches every folder of every job, batches changes, runs syncs in the background |
+| `app.py` | Window, tray icon, settings menu, activity log, export / import, Start with Windows |
+| `cards.py` | The folder-sync cards: folder tree, status, live progress, the editor that slides open |
+| `controls.py` | Toggle switch, theme picker, wrapping rows, tree lines, folder boxes that take drops |
+| `theme.py` | Light and dark colours, the style sheet, and the icons (drawn in code) |
+| `watcher.py` | Watches every folder, batches changes, runs syncs in the background |
 | `engine.py` | The sync rules for each sync type, and version keeping |
-| `store.py` | Jobs, settings and sync history (older single-pair settings are converted automatically) |
-| `icon.py` | Draws the icon |
-| `version.py` | The version number (shown in settings; names the build folder) |
-| `tests/` | Automated tests of syncing and of the window: `py -m pytest tests` |
+| `store.py` | Jobs, settings and sync history |
+| `icon.py`, `exe_info.py`, `version.py` | The app icon, the exe's details, the name and version |
+| `tests/` | Automated tests of syncing and of the window |
+
+## Licence
+
+Synked is free software under the **GNU General Public License v3.0** ([LICENSE](LICENSE)):
+you may use, study, share and change it; versions you share must stay under the GPL with their
+source.
+
+It uses PySide6 (LGPL-3.0), watchdog (Apache-2.0), Send2Trash (BSD-3-Clause) and Pillow
+(MIT-CMU), each under its own licence. The settings gear is drawn from Google's
+[Material Icons](https://fonts.google.com/icons) (Apache-2.0).
+
+© EAGER - Softech · An engineering by Er. K.K.

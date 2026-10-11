@@ -8,8 +8,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import engine  # noqa: E402
 from engine import Engine, LooksEmpty, RootMissing  # noqa: E402
-from store import Config, Pair, StateDB  # noqa: E402
+from store import Config, Job, Member, Pair, StateDB  # noqa: E402
 from watcher import Controller  # noqa: E402
 
 
@@ -258,7 +259,7 @@ def wait_for(cond, timeout=10):
 
 @pytest.fixture
 def live(tmp_path, monkeypatch):
-    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SYNKED_HOME", str(tmp_path / "home"))
     L, R = tmp_path / "L", tmp_path / "R"
     L.mkdir(), R.mkdir()
     bin_ = Bin(str(tmp_path / "bin"))
@@ -331,7 +332,7 @@ def test_live_office_style_save(live):
 
 
 def test_changes_while_app_closed(tmp_path, monkeypatch):
-    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SYNKED_HOME", str(tmp_path / "home"))
     L, R = str(tmp_path / "L"), str(tmp_path / "R")
     os.makedirs(L), os.makedirs(R)
     bin_ = Bin(str(tmp_path / "bin"))
@@ -360,17 +361,20 @@ def test_changes_while_app_closed(tmp_path, monkeypatch):
 
 
 def test_stale_temp_files_are_cleaned_up(env, monkeypatch):
-    """A half-copied temp file left behind by a killed SyncMate is removed once it's an
-    hour old; a recent one (a copy that might still be in progress) is left alone."""
+    """A half-copied temp file left behind by a killed Synked (or SyncMate, before the
+    rename) is removed once it's an hour old; a recent one (a copy that might still be in
+    progress) is left alone."""
     import engine
-    temp = f"{env.R}/.syncmate-dead0001.tmp"
+    temp = f"{env.R}/.synked-dead0001.tmp"
+    old_temp = f"{env.R}/.syncmate-dead0002.tmp"
     write(temp, "half")
+    write(old_temp, "half")
     env.sync()
-    assert os.path.exists(temp)                      # fresh: kept
+    assert os.path.exists(temp) and os.path.exists(old_temp)      # fresh: kept
     real_time = engine.time.time
     monkeypatch.setattr(engine.time, "time", lambda: real_time() + 7200)  # two hours later
     env.sync()
-    assert not os.path.exists(temp)                  # stale: removed
+    assert not os.path.exists(temp) and not os.path.exists(old_temp)   # stale: removed
     assert tree(env.L) == {}                         # and never synced to the other side
 
 
@@ -563,7 +567,7 @@ def test_old_pairs_migrate_to_jobs(tmp_path):
 
 @pytest.fixture
 def job(tmp_path, monkeypatch):
-    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SYNKED_HOME", str(tmp_path / "home"))
     paths = {n: str(tmp_path / n) for n in ("Main", "Two", "Mirror", "Backup")}
     for p in paths.values():
         os.makedirs(p)
@@ -674,7 +678,7 @@ def test_two_way_folder_catches_up_on_deletes_after_being_away(job, monkeypatch)
 def test_all_connected_folders_away_then_back(tmp_path, monkeypatch):
     import watcher
     monkeypatch.setattr(watcher, "HEALTH_EVERY", 0.3)
-    monkeypatch.setenv("SYNCMATE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SYNKED_HOME", str(tmp_path / "home"))
     main, usb = str(tmp_path / "Main"), str(tmp_path / "USB")
     os.makedirs(main), os.makedirs(usb)
     bin_ = Bin(str(tmp_path / "bin"))
@@ -774,10 +778,10 @@ def test_export_and_import_round_trip(tmp_path):
     cfg = Config(theme="dark", jobs=[
         Job(main="D:/Final project", paused=True,
             members=[Member("E:/Backup", "update", True, keep_days=90), Member("F:/Copy", "mirror")])])
-    out = tmp_path / "SyncMate folder syncs.kiru"
-    assert export_settings(str(out), cfg, "2.2") == 1
+    out = tmp_path / "Synked folder syncs.kiru"
+    assert export_settings(str(out), cfg, "3.3") == 1
     raw = json.loads(out.read_text(encoding="utf-8"))
-    assert raw["kind"] == "SyncMate folder syncs" and raw["app_version"] == "2.2"
+    assert raw["kind"] == "Synked folder syncs" and raw["app_version"] == "3.3"
     assert "id" not in raw["jobs"][0]                         # ids are this PC's business
     back = read_settings_file(str(out))
     j = back.jobs[0]
@@ -808,3 +812,66 @@ def test_main_keeps_versions_for_the_longest_wish():
     assert _keep_days_for_main(j) == 90
     j.members.append(Member("D", versions=True, keep_days=0))
     assert _keep_days_for_main(j) == 0                         # one 'forever' wins
+
+
+# ------------------------------------------------------------------ renamed from SyncMate (3.3)
+
+def test_old_syncmate_data_is_carried_over_once(tmp_path):
+    import sqlite3
+    from store import StateDB, migrate_old_home
+    old, new = tmp_path / "SyncMate", tmp_path / "Synked"
+    old.mkdir()
+    cfg = Config(theme="dark", jobs=[Job(main="D:/A", members=[Member("E:/B", "mirror")])])
+    cfg.save(str(old / "config.json"))
+    db = StateDB(str(old / "state.db"))
+    db.put("p1", "a.txt", "a.txt", (False, 1, 2), (False, 1, 2))
+    db.commit()                      # still open: the newest rows sit in the -wal file
+    assert migrate_old_home(str(new), str(old))
+    db.close()
+    back = Config.load(str(new / "config.json"))
+    assert back.theme == "dark" and back.jobs[0].id == cfg.jobs[0].id   # same ids: history fits
+    con = sqlite3.connect(str(new / "state.db"))
+    assert con.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 1
+    con.close()
+    assert (old / "config.json").exists()                     # the old folder is left alone
+    Config(theme="light").save(str(new / "config.json"))
+    assert not migrate_old_home(str(new), str(old))           # never overwrites Synked's own
+    assert Config.load(str(new / "config.json")).theme == "light"
+    assert not migrate_old_home(str(tmp_path / "x"), str(tmp_path / "nothing"))
+
+
+def test_old_versions_folder_is_renamed_and_still_tidied(tmp_path):
+    root = str(tmp_path / "Backup")
+    old = os.path.join(root, engine.OLD_VERSIONS_DIR)
+    day = 86400
+    now = time.time()
+    stamp = time.strftime(engine.MOMENT_FORMAT, time.localtime(now - 40 * day))
+    fresh = time.strftime(engine.MOMENT_FORMAT, time.localtime(now - day))
+    os.makedirs(os.path.join(old, f"{stamp}_001"))
+    os.makedirs(os.path.join(old, f"{fresh}_001"))
+    assert engine.prune_versions(root, 30, now) == 1
+    assert not os.path.exists(old)
+    assert os.listdir(os.path.join(root, engine.VERSIONS_DIR)) == [f"{fresh}_001"]
+    assert engine.is_ignored(".syncmate-versions") and engine.is_ignored(".synked-versions")
+
+
+def test_versions_root_adopts_the_old_folder(tmp_path):
+    root = str(tmp_path / "R")
+    os.makedirs(os.path.join(root, engine.OLD_VERSIONS_DIR, "2026-01-01_00-00-00_001"))
+    v = engine.versions_root(root)
+    assert v.endswith(engine.VERSIONS_DIR)
+    assert os.listdir(v) == ["2026-01-01_00-00-00_001"]
+    assert not os.path.exists(os.path.join(root, engine.OLD_VERSIONS_DIR))
+
+
+def test_syncmate_exports_still_import(tmp_path):
+    import json
+    from store import read_settings_file
+    f = tmp_path / "SyncMate folder syncs 2026-10-11.kiru"
+    f.write_text(json.dumps({"kind": "SyncMate folder syncs", "app_version": "3.2",
+                             "theme": "auto", "jobs": [{"main": "D:/A", "paused": False,
+                             "members": [{"path": "E:/B", "mode": "two-way", "versions": False,
+                                          "keep_days": 30, "paused": True}]}]}),
+                 encoding="utf-8")
+    cfg = read_settings_file(str(f))
+    assert cfg.jobs[0].main == "D:/A" and cfg.jobs[0].members[0].paused

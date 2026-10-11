@@ -1,2 +1,5 @@
-"""SyncMate's version number. Shown in Settings; build.bat names the build folder after it."""
-VERSION = "3.2"
+"""Synked's version number. Shown in the title bar; build.bat names the build folder after it."""
+VERSION = "3.3"
+APP = "Synked"
+COMPANY = "EAGER - Softech"
+CREDIT = "An engineering by Er. K.K."

@@ -1,4 +1,4 @@
-"""SyncMate's look: light and dark palettes, the app-wide style sheet, and the small
+"""Synked's look: light and dark palettes, the app-wide style sheet, and the small
 icons, all drawn in code so they stay crisp at any display scaling."""
 from __future__ import annotations
 
@@ -222,7 +222,7 @@ def status_dot(color: str, size: int = 10, dpr: float = 2.0) -> QPixmap:
 
 
 # ---------------------------------------------------------------------------- style sheet
-_ASSET_DIR = os.path.join(tempfile.gettempdir(), "syncmate-ui")
+_ASSET_DIR = os.path.join(tempfile.gettempdir(), "synked-ui")
 
 
 def _assets(theme: str, pal: dict) -> dict:

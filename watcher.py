@@ -89,8 +89,8 @@ class _Handler(FileSystemEventHandler):
 
 def _setup_file_log() -> logging.Logger:
     """The log file lives in the settings folder; follow it if that folder changed."""
-    log = logging.getLogger("syncmate")
-    path = os.path.abspath(os.path.join(data_dir(), "syncmate.log"))
+    log = logging.getLogger("synked")
+    path = os.path.abspath(os.path.join(data_dir(), "synked.log"))
     for h in list(log.handlers):
         if getattr(h, "baseFilename", None) != path:
             log.removeHandler(h)
@@ -141,7 +141,7 @@ class Controller:
         self._last_full: dict[str, float] = {}
         self._observer = Observer()
         self._stop = False
-        self._thread = threading.Thread(target=self._run, name="syncmate-worker", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="synked-worker", daemon=True)
 
     # ================================================================== public API
 

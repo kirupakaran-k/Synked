@@ -14,7 +14,7 @@ That is the "two-way" type. Each connected folder can instead use:
     collect  folder -> Main: the same, in the other direction
 
 Replaced or deleted files go to the Recycle Bin, or, if the folder keeps versions, into
-its hidden ".syncmate-versions" folder: one folder per sync moment, named like
+its hidden ".synked-versions" folder: one folder per sync moment, named like
 "2026-10-10_12-38-05_001", holding the old files in their usual subfolders. Moments older
 than the folder's chosen number of days are removed.
 
@@ -40,13 +40,16 @@ IGNORED = [
     "~$*", ".~lock.*", "*.tmp", "*.temp", "*.crdownload", "*.part", "~*.tmp",
     "desktop.ini", "thumbs.db", ".ds_store", "$recycle.bin", "system volume information",
     ".849c9593-d756-4e56-8d6e-42412f2a707b",  # OneDrive's hidden marker file
-    ".syncmate-*",                            # our own temp files and fallback bin
+    ".synked-*",                              # our own temp files and fallback bin
+    ".syncmate-*",                            # the same, from before the rename (3.2 and older)
 ]
 _IGNORED = [p.lower() for p in IGNORED]
 
-TEMP_PREFIX = ".syncmate-"
-FALLBACK_BIN = ".syncmate-recycle"
-VERSIONS_DIR = ".syncmate-versions"
+TEMP_PREFIX = ".synked-"
+OLD_TEMP_PREFIX = ".syncmate-"          # temp files left by SyncMate (3.2 and older)
+FALLBACK_BIN = ".synked-recycle"
+VERSIONS_DIR = ".synked-versions"
+OLD_VERSIONS_DIR = ".syncmate-versions"   # renamed to VERSIONS_DIR the first time it's used
 MOMENT_FORMAT = "%Y-%m-%d_%H-%M-%S"   # + "_001": one folder per sync moment
 MTIME_TOLERANCE_NS = 2_000_000_000  # FAT/exFAT drives store times in 2-second steps
 EMPTY_GUARD_MIN = 20  # a side that suddenly lost >= this many items makes us stop and ask
@@ -111,7 +114,7 @@ def scan(root: str, rel: str = "") -> dict:
             continue  # vanished mid-scan; the watcher will tell us about it
         with it:
             for e in it:
-                if e.name.startswith(TEMP_PREFIX) and e.name.endswith(".tmp"):
+                if e.name.startswith((TEMP_PREFIX, OLD_TEMP_PREFIX)) and e.name.endswith(".tmp"):
                     _remove_stale_temp(e.path)
                     continue
                 if is_ignored(e.name):
@@ -130,7 +133,7 @@ def scan(root: str, rel: str = "") -> dict:
 
 
 def _remove_stale_temp(path: str) -> None:
-    """Delete a half-copied temp file left behind if SyncMate was killed mid-copy."""
+    """Delete a half-copied temp file left behind if Synked was killed mid-copy."""
     try:
         if time.time() - os.stat(path).st_ctime > 3600:
             os.remove(path)
@@ -541,8 +544,21 @@ class Engine:
                            shallow=False)
 
 
+def adopt_old_versions(root: str) -> None:
+    """Rename a folder's old ".syncmate-versions" (from before the app was renamed) to
+    ".synked-versions", so versions kept earlier stay together and keep being tidied."""
+    vroot = os.path.join(root, VERSIONS_DIR)
+    old = os.path.join(root, OLD_VERSIONS_DIR)
+    if not os.path.lexists(vroot) and os.path.isdir(old):
+        try:
+            os.rename(old, vroot)
+        except OSError:
+            pass
+
+
 def versions_root(root: str) -> str:
-    """<root>/.syncmate-versions, created and (on Windows) marked hidden."""
+    """<root>/.synked-versions, created and (on Windows) marked hidden."""
+    adopt_old_versions(root)
     vroot = os.path.join(root, VERSIONS_DIR)
     if not os.path.isdir(vroot):
         os.makedirs(vroot, exist_ok=True)
@@ -575,7 +591,7 @@ def new_moment(root: str, when: float | None = None) -> str:
 
 def keep_version(root: str, rel: str, moment: str) -> str:
     """Move `rel` (a file or a whole folder) into the moment's folder, keeping its usual
-    subfolders, e.g. .syncmate-versions/2026-10-10_12-38-05_001/Reports/budget.xlsx.
+    subfolders, e.g. .synked-versions/2026-10-10_12-38-05_001/Reports/budget.xlsx.
     Returns where it went."""
     dest = os.path.join(root, VERSIONS_DIR, moment, rel)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -604,21 +620,23 @@ def prune_versions(root: str, keep_days: int, now: float | None = None) -> int:
     """Remove moment folders older than `keep_days` (0 = keep forever). Returns how many."""
     if keep_days <= 0:
         return 0
-    vroot = os.path.join(root, VERSIONS_DIR)
-    try:
-        names = os.listdir(vroot)
-    except OSError:
-        return 0
+    adopt_old_versions(root)
     cutoff = (now if now is not None else time.time()) - keep_days * 86400
     removed = 0
-    for name in names:
-        t = moment_time(name)
-        if t is not None and t < cutoff:
-            try:
-                shutil.rmtree(os.path.join(vroot, name))
-                removed += 1
-            except OSError:
-                pass
+    for vdir in (VERSIONS_DIR, OLD_VERSIONS_DIR):   # the old one only if both exist
+        vroot = os.path.join(root, vdir)
+        try:
+            names = os.listdir(vroot)
+        except OSError:
+            continue
+        for name in names:
+            t = moment_time(name)
+            if t is not None and t < cutoff:
+                try:
+                    shutil.rmtree(os.path.join(vroot, name))
+                    removed += 1
+                except OSError:
+                    pass
     return removed
 
 

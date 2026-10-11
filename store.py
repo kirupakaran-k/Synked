@@ -1,4 +1,4 @@
-"""Settings (JSON) and last-sync state (SQLite) for SyncMate."""
+"""Settings (JSON) and last-sync state (SQLite) for Synked."""
 from __future__ import annotations
 
 import json
@@ -10,14 +10,50 @@ import uuid
 from dataclasses import asdict, dataclass, field
 
 
+APP_NAME = "Synked"
+OLD_APP_NAME = "SyncMate"      # the app's name up to 3.2; its data is copied over once
+_MIGRATE_FILES = ("config.json", "state.db", "state.db-wal", "state.db-shm")
+
+
+def _home_for(name: str) -> str:
+    if os.name == "nt":
+        return os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), name)
+    return os.path.join(os.path.expanduser("~"), ".config", name.lower())
+
+
+def migrate_old_home(new: str, old: str) -> bool:
+    """First run after the rename: copy your syncs and sync history from the old SyncMate
+    folder, so nothing is set up again and nothing is re-copied. The old folder is left
+    as it was (it can be deleted by hand). Returns True if anything was carried over."""
+    if os.path.exists(os.path.join(new, "config.json")):
+        return False
+    if not os.path.exists(os.path.join(old, "config.json")):
+        return False
+    import shutil
+    os.makedirs(new, exist_ok=True)
+    try:   # fold the database's write-ahead log in first, so one file holds everything
+        con = sqlite3.connect(os.path.join(old, "state.db"))
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.close()
+    except sqlite3.Error:
+        pass
+    for name in _MIGRATE_FILES:
+        src = os.path.join(old, name)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(new, name))
+    return True
+
+
+def old_app_dir() -> str:
+    """Where SyncMate (this app's name up to 3.2) kept its data."""
+    return _home_for(OLD_APP_NAME)
+
+
 def app_dir() -> str:
-    """SyncMate's home: %APPDATA%\\SyncMate."""
-    base = os.environ.get("SYNCMATE_HOME")
+    """Synked's home: %APPDATA%\\Synked (set SYNKED_HOME to use another folder)."""
+    base = os.environ.get("SYNKED_HOME")
     if not base:
-        if os.name == "nt":
-            base = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "SyncMate")
-        else:
-            base = os.path.join(os.path.expanduser("~"), ".config", "syncmate")
+        base = _home_for(APP_NAME)
     os.makedirs(base, exist_ok=True)
     return base
 
@@ -55,7 +91,7 @@ OLD_FILES_HELP = {
     False: "Files that get removed or replaced in this folder go to the Windows Recycle Bin, "
            "where you can restore them.",
     True: "Files that get removed or replaced in this folder are moved into its hidden "
-          ".syncmate-versions folder, one dated folder per sync (e.g. "
+          ".synked-versions folder, one dated folder per sync (e.g. "
           "2026-10-10_12-38-05_001), and kept for the number of days you choose. "
           "Slide, or type a number of days; slide all the way right to keep them forever.",
 }
@@ -293,7 +329,7 @@ class StateDB:
 
 # --------------------------------------------------------------------------- export / import
 
-EXPORT_KIND = "SyncMate folder syncs"
+EXPORT_KIND = "Synked folder syncs"
 CONFIG_EXT = ".kiru"   # exported folder sync configurations (JSON inside)
 
 
@@ -315,18 +351,18 @@ def export_settings(path: str, config: Config, version: str = "") -> int:
 
 
 def read_settings_file(path: str) -> Config:
-    """Read an exported file (or a SyncMate config.json). Every job and folder gets a new id,
-    so importing never mixes with existing sync history. Raises ValueError if it isn't a
-    SyncMate file."""
+    """Read an exported file (or a config.json, including SyncMate's). Every job and folder
+    gets a new id, so importing never mixes with existing sync history. Raises ValueError if it isn't a
+    Synked file."""
     try:
         with open(path, encoding="utf-8") as f:
             raw = json.load(f)
     except OSError as e:
         raise ValueError(f"Couldn't open the file: {e.strerror or e}") from e
     except ValueError as e:
-        raise ValueError("That file isn't a SyncMate settings file.") from e
+        raise ValueError("That file isn't a Synked settings file.") from e
     if not isinstance(raw, dict) or not ("jobs" in raw or "pairs" in raw):
-        raise ValueError("That file isn't a SyncMate settings file.")
+        raise ValueError("That file isn't a Synked settings file.")
     try:
         cfg = Config.from_dict(raw)
     except (KeyError, TypeError) as e:
