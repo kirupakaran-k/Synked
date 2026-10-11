@@ -50,7 +50,7 @@ MODE_HELP = {
 }
 
 # What happens to files that get removed or replaced in a connected folder.
-OLD_FILES_LABELS = {False: "Old files → Recycle Bin", True: "Keep old versions"}
+OLD_FILES_LABELS = {False: "Old files to Recycle Bin", True: "Keep old versions"}
 OLD_FILES_HELP = {
     False: "Files that get removed or replaced in this folder go to the Windows Recycle Bin, "
            "where you can restore them.",
@@ -124,6 +124,7 @@ class Member:
     versions: bool = False
     id: str = field(default_factory=_new_id)
     keep_days: int = 30   # how long kept versions stay (0 = forever)
+    paused: bool = False  # this folder alone is paused (the job's other folders go on)
 
 
 @dataclass
@@ -172,7 +173,8 @@ class Config:
             members = [Member(path=m["path"], id=m.get("id") or _new_id(),
                               mode=m.get("mode") if m.get("mode") in MODES else "two-way",
                               versions=bool(m.get("versions", False)),
-                              keep_days=max(0, int(m.get("keep_days", 30))))
+                              keep_days=max(0, int(m.get("keep_days", 30))),
+                              paused=bool(m.get("paused", False)))
                        for m in j.get("members", [])]
             jobs.append(Job(main=j["main"], members=members, paused=j.get("paused", False),
                             id=j.get("id") or _new_id()))
@@ -303,7 +305,7 @@ def export_settings(path: str, config: Config, version: str = "") -> int:
             "exported": time.strftime("%Y-%m-%d %H:%M:%S"), "theme": config.theme,
             "jobs": [{"main": j.main, "paused": j.paused,
                       "members": [{"path": m.path, "mode": m.mode, "versions": m.versions,
-                                   "keep_days": m.keep_days}
+                                   "keep_days": m.keep_days, "paused": m.paused}
                                   for m in j.members]} for j in config.jobs]}
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -332,5 +334,5 @@ def read_settings_file(path: str) -> Config:
     for j in cfg.jobs:
         j.id = _new_id()
         j.members = [Member(path=m.path, mode=m.mode, versions=m.versions,
-                            keep_days=m.keep_days) for m in j.members]
+                            keep_days=m.keep_days, paused=m.paused) for m in j.members]
     return cfg

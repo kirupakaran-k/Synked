@@ -141,6 +141,31 @@ def cross_icon(color: str, size: int = 14, dpr: float = 2.0) -> QIcon:
     return QIcon(pm)
 
 
+def pause_icon(color: str, size: int = 14, dpr: float = 2.0) -> QIcon:
+    pm, p = _canvas(size, size, dpr)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    w, h = size * 0.24, size * 0.72
+    for x in (size * 0.2, size * 0.56):
+        p.drawRoundedRect(QRectF(x, (size - h) / 2, w, h), w * 0.3, w * 0.3)
+    p.end()
+    return QIcon(pm)
+
+
+def play_icon(color: str, size: int = 14, dpr: float = 2.0) -> QIcon:
+    pm, p = _canvas(size, size, dpr)
+    p.setPen(_pen(color, size * 0.08))
+    p.setBrush(QColor(color))
+    tri = QPainterPath()
+    tri.moveTo(size * 0.28, size * 0.16)
+    tri.lineTo(size * 0.86, size * 0.5)
+    tri.lineTo(size * 0.28, size * 0.84)
+    tri.closeSubpath()
+    p.drawPath(tri)
+    p.end()
+    return QIcon(pm)
+
+
 def chevron_pixmap(color: str, size: int = 12, dpr: float = 2.0, up: bool = False) -> QPixmap:
     pm, p = _canvas(size, size, dpr)
     p.setPen(_pen(color, size * 0.12))
@@ -258,6 +283,12 @@ QPushButton[kind="danger"] {{
 QPushButton[kind="danger"]:hover {{ background: {p['danger_hover']}; border-color: {p['danger_hover']}; }}
 QPushButton[kind="danger"]:pressed {{ background: {p['danger_pressed']}; }}
 QPushButton[kind="icon"] {{ padding: 0px; min-width: 32px; max-width: 32px; }}
+QPushButton[kind="hold"] {{
+    background: {p['accent']}; border: 1px solid {p['accent']}; padding: 0px;
+    min-width: 38px; max-width: 38px;
+}}
+QPushButton[kind="hold"]:hover {{ background: {p['accent_hover']}; border-color: {p['accent_hover']}; }}
+QPushButton[kind="hold"]:pressed {{ background: {p['accent_pressed']}; }}
 QPushButton[kind="remove"] {{
     background: {p['danger']}; border: 1px solid {p['danger']}; padding: 0px;
     min-width: 38px; max-width: 38px;
@@ -287,6 +318,8 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 QComboBox QAbstractItemView::item {{ min-height: 28px; padding: 0px 8px; border-radius: 4px; }}
+QComboBox QAbstractItemView::item:selected, QComboBox QAbstractItemView::item:hover {{
+    background: {p['selection']}; color: {p['text']}; }}
 
 /* slider */
 QSlider::groove:horizontal {{ height: 4px; background: {p['track']}; border-radius: 2px; }}

@@ -45,6 +45,7 @@ class Status:
     progress_link: str = ""            # which connected folder the progress is for
     offline: tuple = ()                # connected folders that aren't there right now
                                        # (e.g. an unplugged drive): skipped until they're back
+    held: tuple = ()                   # connected folders you paused on their own
 
 
 @dataclass
@@ -251,6 +252,10 @@ class Controller:
     def set_paused(self, jid: str, paused: bool) -> None:
         self._command("pause" if paused else "resume", jid)
 
+    def set_member_paused(self, jid: str, member_id: str, paused: bool) -> None:
+        """Pause or resume one connected folder; the job's other folders carry on."""
+        self._command("member", jid, member_id, paused)
+
     def sync_now(self, jid: str | None = None) -> None:
         for j in self.jobs():
             if jid in (None, j.id) and not j.paused:
@@ -332,6 +337,11 @@ class Controller:
     def _offline(job: Job) -> set:
         """Connected folders that aren't there right now (an unplugged drive, say)."""
         return {m.id for m in job.members if not os.path.isdir(m.path)}
+
+    @staticmethod
+    def _held(job: Job) -> set:
+        """Connected folders you paused on their own."""
+        return {m.id for m in job.members if m.paused}
 
     @staticmethod
     def _waiting_for(job: Job, offline: set) -> str:
@@ -420,6 +430,19 @@ class Controller:
             elif cmd == "edit":
                 main, members = args
                 self._apply_edit(job, main, members)
+            elif cmd == "member":
+                mid, paused = args
+                with self._lock:
+                    j = next((j for j in self.config.jobs if j.id == jid), None)
+                    m = next((m for m in j.members if m.id == mid), None) if j else None
+                    if m is None or m.paused == paused:
+                        continue
+                    m.paused = paused
+                    self._save()
+                self._log(jid, "info", f"Paused {m.path} (the other folders keep syncing)"
+                          if paused else f"Resumed {m.path} — catching up")
+                if not job.paused:
+                    self._start_job(self._job(jid))
             elif cmd == "resolve":
                 apply_deletion = args[0]
                 st = self.snapshot().get(jid)
@@ -471,16 +494,21 @@ class Controller:
             self._unwatch(job.id)
             self._set(job.id, state="error", message=f"Folder not found: {job.main}")
             return
-        offline = self._offline(job)
-        self._set(job.id, offline=tuple(sorted(offline)))
-        if offline and len(offline) == len(job.members):
-            # nothing to sync with yet; Main is still watched so nothing is missed
-            self._watch(job, skip=offline)
-            self._set(job.id, state="waiting", progress=None,
-                      message=self._waiting_for(job, offline))
+        offline, held = self._offline(job), self._held(job)
+        skip = offline | held
+        self._set(job.id, offline=tuple(sorted(offline)), held=tuple(sorted(held - offline)))
+        if skip and len(skip) == len(job.members):
+            # nothing to sync with right now; Main is still watched so nothing is missed
+            self._watch(job, skip=skip)
+            if offline - held:
+                self._set(job.id, state="waiting", progress=None,
+                          message=self._waiting_for(job, offline - held))
+            else:
+                self._set(job.id, state="paused", progress=None,
+                          message="Every folder in this sync is paused")
             return
         try:
-            self._watch(job, skip=offline)
+            self._watch(job, skip=skip)
         except Exception as e:
             self._set(job.id, state="error", message=f"Can't watch folder: {e}")
             return
@@ -541,11 +569,16 @@ class Controller:
             self._unwatch(jid)
             self._set(jid, state="error", progress=None, message=f"Folder not found: {job.main}")
             return
-        offline = self._offline(job)
-        links = [link for link in job.links() if link.id not in offline]
-        self._set(jid, offline=tuple(sorted(offline)))
+        offline, held = self._offline(job), self._held(job)
+        links = [link for link in job.links() if link.id not in offline | held]
+        self._set(jid, offline=tuple(sorted(offline)), held=tuple(sorted(held - offline)))
         if not links:
-            self._set(jid, state="waiting", progress=None, message=self._waiting_for(job, offline))
+            if offline - held:
+                self._set(jid, state="waiting", progress=None,
+                          message=self._waiting_for(job, offline - held))
+            else:
+                self._set(jid, state="paused", progress=None,
+                          message="Every folder in this sync is paused")
             return
         self._set(jid, state="syncing", message="", progress=None)
         failed: list = []   # (where, rel)
@@ -640,7 +673,8 @@ def _keep_days_for_main(job: Job) -> int:
 def _member(m) -> Member:
     if isinstance(m, Member):
         return Member(path=os.path.abspath(m.path), mode=m.mode if m.mode in MODES else "two-way",
-                      versions=bool(m.versions), id=m.id, keep_days=max(0, int(m.keep_days)))
+                      versions=bool(m.versions), id=m.id, keep_days=max(0, int(m.keep_days)),
+                      paused=bool(getattr(m, "paused", False)))
     defaults = ("", "two-way", False, 30)          # (path, mode, versions, keep_days)
     path, mode, versions, keep_days = tuple(m)[:4] + defaults[len(tuple(m)[:4]):]
     return Member(path=os.path.abspath(path), mode=mode if mode in MODES else "two-way",

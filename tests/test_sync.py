@@ -720,6 +720,52 @@ def test_can_edit_a_job_while_one_folder_is_unplugged(job, monkeypatch):
     assert ctrl.validate(j.main, paths) is not None              # a brand-new job isn't
 
 
+def test_pause_one_folder_the_others_go_on(job):
+    ctrl, P, bin_ = job
+    j = ctrl.jobs()[0]
+    two = next(m.id for m in j.members if m.path == P["Two"])
+    ctrl.set_member_paused(j.id, two, True)
+    assert wait_for(lambda: two in ctrl.snapshot()[j.id].held)
+    assert next(m for m in ctrl.jobs()[0].members if m.id == two).paused   # remembered
+    write(f"{P['Main']}/while-paused.txt", "x")
+    write(f"{P['Two']}/made-in-two.txt", "y")
+    assert wait_for(lambda: os.path.exists(f"{P['Mirror']}/while-paused.txt")
+                    and os.path.exists(f"{P['Backup']}/while-paused.txt"))
+    time.sleep(1)
+    assert not os.path.exists(f"{P['Two']}/while-paused.txt")      # paused: left alone
+    assert not os.path.exists(f"{P['Main']}/made-in-two.txt")
+    st = ctrl.snapshot()[j.id]
+    assert st.state == "synced"
+    ctrl.set_member_paused(j.id, two, False)                          # resume: catches up
+    assert wait_for(lambda: os.path.exists(f"{P['Two']}/while-paused.txt")
+                    and os.path.exists(f"{P['Main']}/made-in-two.txt"))
+    assert wait_for(lambda: ctrl.snapshot()[j.id].held == ())
+    msgs = [m for _, _, m in ctrl.recent_activity(j.id, n=20)]
+    assert any(m.startswith("Paused") for m in msgs) and any(m.startswith("Resumed") for m in msgs)
+
+
+def test_folder_pause_is_saved_and_exported(tmp_path):
+    from store import Config, Job, Member, export_settings, read_settings_file
+    cfg = Config(jobs=[Job(main=str(tmp_path / "M"),
+                           members=[Member(path=str(tmp_path / "A"), paused=True),
+                                    Member(path=str(tmp_path / "B"))])])
+    cfg.save(str(tmp_path / "config.json"))
+    again = Config.load(str(tmp_path / "config.json"))
+    assert [m.paused for m in again.jobs[0].members] == [True, False]
+    export_settings(str(tmp_path / "x.kiru"), cfg)
+    back = read_settings_file(str(tmp_path / "x.kiru"))
+    assert [m.paused for m in back.jobs[0].members] == [True, False]
+
+
+def test_every_folder_paused(job):
+    ctrl, P, bin_ = job
+    j = ctrl.jobs()[0]
+    for m in j.members:
+        ctrl.set_member_paused(j.id, m.id, True)
+    assert wait_for(lambda: ctrl.snapshot()[j.id].state == "paused")
+    assert "paused" in ctrl.snapshot()[j.id].message
+
+
 # ------------------------------------------------------------------ export / import
 
 def test_export_and_import_round_trip(tmp_path):

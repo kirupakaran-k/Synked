@@ -9,19 +9,25 @@ import os
 import time
 
 from PySide6.QtCore import QEasingCurve, QEvent, QSize, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QProgressBar, QPushButton, QSizePolicy,
-                               QSlider, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+                               QSlider, QStackedWidget, QStyledItemDelegate, QToolButton,
+                               QVBoxLayout, QWidget)
 
 import theme
 from controls import EdgeLayout, FlowLayout, PathCombo, PathEdit, TreeLine
-from store import (KEEP_DAY_STOPS, KEEP_DAYS_HELP, MODE_HELP, MODE_LABELS, MODES,
+from store import (KEEP_DAY_STOPS, KEEP_DAYS_HELP, MODE_HELP, MODES,
                    OLD_FILES_HELP, OLD_FILES_LABELS, Member, nearest_stop, parse_days)
 from ui_common import (ONEDRIVE, describe, elide, folder_name, open_folder, pretty_path,
                        progress_detail)
 
 ARROW_KIND = {"two-way": "both", "mirror": "right", "update": "right", "collect": "left"}
 SHORT_MODE = {"two-way": "Two-way", "mirror": "Mirror", "update": "Update", "collect": "Collect"}
+# Sync types in the dropdown: plain words, with the direction drawn as a small badge
+# (arrow characters like ⇄ come out tiny or garbled in many Windows fonts)
+MODE_ITEMS = {"two-way": "Two-way  ·  both ways", "mirror": "Mirror  ·  Main to folder",
+              "update": "Update  ·  Main to folder", "collect": "Collect  ·  folder to Main"}
 BOX_HINT = ("Type a folder path, use Browse, or drag a folder here from File Explorer. "
             "A folder that doesn't exist yet is created.")
 QWIDGETSIZE_MAX = 16777215
@@ -219,6 +225,10 @@ class FolderRow(QWidget):
         b = button("Open")
         b.clicked.connect(lambda: card.open_path(self.path.text()))
         top.addWidget(b)
+        self.paused = bool(member and member.paused)
+        self.hold = button("", "hold")
+        self.hold.clicked.connect(self._toggle_hold)
+        top.addWidget(self.hold)
         self.remove = button("", "remove", "Remove this folder from the sync (its files stay "
                                             "where they are)")
         self.remove.clicked.connect(lambda: self.remove_requested.emit(self))
@@ -229,8 +239,10 @@ class FolderRow(QWidget):
         flow = FlowLayout(opts, 8, 6)
         self.mode = QComboBox()
         for i, m in enumerate(MODES):
-            self.mode.addItem(MODE_LABELS[m], m)
+            self.mode.addItem(MODE_ITEMS[m], m)
             self.mode.setItemData(i, MODE_HELP[m], Qt.ToolTipRole)
+        self.mode.setIconSize(QSize(24, 17))
+        self.mode.setItemDelegate(QStyledItemDelegate(self.mode))   # list styled like the app
         self.mode.setSizeAdjustPolicy(QComboBox.AdjustToContents)
         self.mode.currentIndexChanged.connect(self._mode_tip)
         flow.addWidget(self.mode)
@@ -240,6 +252,7 @@ class FolderRow(QWidget):
             self.old.addItem(OLD_FILES_LABELS[keep], keep)
             self.old.setItemData(i, OLD_FILES_HELP[keep], Qt.ToolTipRole)
         self.old.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.old.setItemDelegate(QStyledItemDelegate(self.old))
         self.old.currentIndexChanged.connect(self._old_changed)
         flow.addWidget(self.old)
 
@@ -281,9 +294,11 @@ class FolderRow(QWidget):
         self.mode.setCurrentIndex(MODES.index(mode))
         self.old.setCurrentIndex(1 if member and member.versions else 0)
         self.keep_days = max(0, member.keep_days) if member else 30
+        self.paused = bool(member and member.paused)
         self._show_days()
         self._mode_tip()
         self._old_changed()
+        self._hold_look()
 
     def value(self) -> Member | None:
         path = self.path.text().strip().strip('"')
@@ -291,7 +306,8 @@ class FolderRow(QWidget):
             return None
         self.settle()
         return Member(path=path, mode=self.mode.currentData(), versions=bool(self.old.currentData()),
-                      keep_days=self.keep_days, **({"id": self.id} if self.id else {}))
+                      keep_days=self.keep_days, paused=self.paused,
+                      **({"id": self.id} if self.id else {}))
 
     # ---- behaviour
     def _mode_tip(self, *_):
@@ -336,9 +352,29 @@ class FolderRow(QWidget):
     def set_suggestions(self, items):
         self.path.set_suggestions(items)
 
+    def _toggle_hold(self):
+        """Pause or resume just this folder. For a folder that's already syncing it takes
+        effect right away; for a new one, when the sync is saved."""
+        self.paused = not self.paused
+        self._hold_look()
+        self.card.member_paused(self)
+
+    def _hold_look(self):
+        c = theme.pal()
+        self.hold.setIcon(theme.play_icon(c["on_accent"], 14) if self.paused
+                          else theme.pause_icon(c["on_accent"], 14))
+        self.hold.setIconSize(QSize(14, 14))
+        self.hold.setToolTip("Resume syncing this folder" if self.paused else
+                             "Pause just this folder (the others keep syncing)")
+
     def retheme(self):
         self.remove.setIcon(theme.cross_icon("#FFFFFF", 14))
         self.remove.setIconSize(QSize(14, 14))
+        c = theme.pal()
+        for i, m in enumerate(MODES):
+            self.mode.setItemIcon(i, QIcon(theme.badge_pixmap(ARROW_KIND[m], c["accent"],
+                                                              c["on_accent"], 24, 17)))
+        self._hold_look()
 
 
 # ============================================================================ card
@@ -644,6 +680,12 @@ class JobCard(QFrame):
             QTimer.singleShot(0, lambda: self.win.keep_visible(self))
         return row
 
+    def member_paused(self, row: FolderRow):
+        if self.is_new or not row.id or self.job is None:
+            return                                 # saved with the rest on Start syncing
+        if any(m.id == row.id for m in self.job.members):
+            self.win.ctrl.set_member_paused(self.job.id, row.id, row.paused)
+
     def remove_row(self, row: FolderRow):
         self.rows.remove(row)
         row.setParent(None)
@@ -719,19 +761,27 @@ class JobCard(QFrame):
             self.status.style().polish(self.status)
         set_text(self.status, describe(st, job))
         offline = set(getattr(st, "offline", ()) or ())
-        if self._state.get("offline") != offline:
-            self._state["offline"] = offline
+        held = {m.id for m in job.members if m.paused}
+        if self._state.get("offline") != (offline, held):
+            self._state["offline"] = (offline, held)
             for mid, r in self.branch_rows.items():
-                off = mid in offline
-                r["offline"] = off
-                r["sub"].setText("Not connected · syncs again when it's back" if off else r["normal"])
-                r["sub"].setProperty("role", "warn" if off else "muted")
+                off, hold = mid in offline, mid in held
+                r["offline"] = off or hold
+                if hold:
+                    text, role = "Paused · the other folders keep syncing", "muted"
+                    tip = f"Syncing with {r['path']} is paused. Open this sync to resume it."
+                elif off:
+                    text, role = "Not connected · syncs again when it's back", "warn"
+                    tip = (f"{r['path']} isn't connected right now (an unplugged drive?). The "
+                           "other folders keep syncing; this one catches up by itself when "
+                           "it's back.")
+                else:
+                    text, role, tip = r["normal"], "muted", MODE_HELP[r["mode"]]
+                r["sub"].setText(text)
+                r["sub"].setProperty("role", role)
                 r["sub"].style().unpolish(r["sub"])
                 r["sub"].style().polish(r["sub"])
-                r["badge"].setToolTip(f"{r['path']} isn't connected right now (an unplugged "
-                                      "drive?). The other folders keep syncing; this one catches "
-                                      "up by itself when it's back." if off
-                                      else MODE_HELP[r["mode"]])
+                r["badge"].setToolTip(tip)
             self.retheme()
         p = st.progress
         busy = st.state == "syncing" and p is not None and p.items_total > 0
@@ -773,6 +823,7 @@ class JobCard(QFrame):
             g.addWidget(label(msg, "error" if level == "error" else "muted", wrap=True), i, 1)
         if self.activity is not None:
             self.activity_holder.removeWidget(self.activity)
+            self.activity.hide()                 # (gone at once, not when Qt deletes it)
             self.activity.deleteLater()
         self.activity = box
         self.activity_holder.addWidget(box)
@@ -841,7 +892,7 @@ class JobCard(QFrame):
         if not same_path(main or ".", j.main) or len(members) != len(j.members):
             return False
         return all(m.id == o.id and same_path(m.path, o.path) and m.mode == o.mode
-                   and m.versions == o.versions and (not m.versions or m.keep_days == o.keep_days)
+                   and m.paused == o.paused and m.versions == o.versions and (not m.versions or m.keep_days == o.keep_days)
                    for m, o in zip(members, j.members))
 
     def apply(self):

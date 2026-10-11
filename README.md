@@ -10,7 +10,7 @@ moving it.
    (or from python.org; tick **Add python.exe to PATH**).
 2. Double-click **`build.bat`** in the version's folder. A couple of minutes later the app is
    ready in a folder named after its version, **outside** the version folders, e.g.
-   `D:\syncmate\build 3.1\SyncMate.exe` (with its icon and build log).
+   `D:\syncmate\build 3.2\SyncMate.exe` (with its icon and build log).
 
    Version 3 draws its window with **Qt** (PySide6, free and open source). The first build
    downloads it (about 100 MB), so it takes a few minutes; later builds are quick.
@@ -25,7 +25,7 @@ moving it.
    wrong, the window stays open so you can read why. If *Start with Windows* is on, it
    follows to the newest build the next time that build runs.
 
-3. Run `build 3.1\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
+3. Run `build 3.2\SyncMate.exe`, click **Add folder sync**, choose a **Main folder** and one or more
    **connected folders**, and click **Start syncing**. You can also **drag folders from
    File Explorer** onto the boxes or onto the window (several at once: the first becomes
    Main, the rest connected folders).
@@ -37,6 +37,10 @@ moving it.
    its ⋮ button) to expand it: change folders, sync types and options, add or remove
    connected folders and **Apply**; Pause / Resume, Sync now, see its **recent activity**,
    or Remove it.
+
+   Each connected folder has a blue **pause** button (left of its red ✕): it pauses just that
+   folder while the others keep syncing, and turns into a play button to resume it. A resumed
+   folder catches up on everything it missed.
 
    Qt draws the whole window off-screen and shows only finished pictures, so nothing is
    ever seen half-drawn: a folder sync slides open downward like a curtain (and back up),

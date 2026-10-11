@@ -3,6 +3,10 @@
 Every version of Synked, newest first. Up to 3.2 the app was called SyncMate.
 Versions before 1.1 had no number in the app; they're labelled 1.0.0 to 1.0.8.
 
+## 3.2 - Pause single folders
+
+Each connected folder has its own blue pause button (left of its red ✕): it pauses just that folder while Main and the other folders keep syncing, and turns into a play button to resume; the folder then catches up on everything it missed, including deletions. A paused folder is shown greyed as 'Paused · the other folders keep syncing' in the tree, the status line says how many folders are paused, and the activity log notes it. Paused folders are remembered and included in exports (.kiru). If every folder of a sync is paused, it says so. The sync-type list now shows a drawn arrow badge and plain words (both ways / Main to folder / folder to Main) instead of tiny arrow characters that some Windows fonts garble; the old-files choice reads 'Old files to Recycle Bin'; the dropdown lists match the app's style; and the Recent activity lines no longer overlap for a moment while they update.
+
 ## 3.1 - Unplugged drives don't stop a sync
 
 If one connected folder of a sync is on a drive that gets unplugged, the other folders keep syncing. The missing one is shown greyed as 'Not connected · syncs again when it's back' in the tree, the status line says how many folders aren't connected, and the activity log notes it. When the drive is plugged back in, that folder catches up by itself, including files deleted elsewhere while it was away. If every connected folder is away, the sync waits for one to be connected while still watching Main. Only a missing Main folder pauses the whole sync (deleting nothing). A sync can now be edited and applied while one of its drives is unplugged.

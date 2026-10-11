@@ -80,6 +80,9 @@ def describe(st, job) -> str:
         text = f"In sync · synced {synced_at(st.last_sync)}" if st.last_sync else "In sync"
         if off:
             text += f" · {off} folder{'s' if off > 1 else ''} not connected"
+        held = len(getattr(st, "held", ()) or ())
+        if held:
+            text += f" · {held} folder{'s' if held > 1 else ''} paused"
         return text
     if st.state in ("syncing", "starting"):
         p = st.progress
@@ -92,7 +95,7 @@ def describe(st, job) -> str:
             return f"Removing {elide(p.rel, 44)} from {dest}"
         return f"{_VERB.get(p.action, 'Syncing')} {elide(p.rel, 44)} → {dest}"
     if st.state == "paused":
-        return "Paused"
+        return st.message or "Paused"
     return st.message.replace(ONEDRIVE, "OneDrive") if ONEDRIVE else st.message
 
 
